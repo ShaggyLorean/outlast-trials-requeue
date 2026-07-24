@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "release": {
+    "name": "Outlast Requeue",
+    "author": "whispersgone",
+    "version": "1.0.2",
+    "release_date": "2026-07-22"
+  },
+  "game": {
+    "name": "The Outlast Trials",
+    "store": "Steam",
+    "steam_app_id": 1304930,
+    "last_verified_build_id": "24322931",
+    "engine_family": "Unreal Engine 4.27",
+    "strict_build_match": false
+  },
+  "pak": {
+    "filename": "zzz-OutlastRequeue_P.pak",
+    "sha256": "1998125961ea66886ae41d71fe15ec2d555d045b980bc487ac5a6ea2a92d0c54",
+    "install_path_relative_to_game": "OPP/Content/Paks/zzz-OutlastRequeue_P.pak"
+  },
+  "platforms": {
+    "windows": {
+      "architecture": "x86_64",
+      "distribution": "portable",
+      "service": false,
+      "autostart": false,
+      "native_hardware_validation": "pending"
+    }
+  },
+  "automation_contract": {
+    "manual_first_search": true,
+    "exact_invasion_ticket_required": true,
+    "matching_timeout_required": true,
+    "new_ticket_confirmation_required": true,
+    "confirmation_timeout_ms": 15000,
+    "action_expiry_required": true,
+    "blind_retry": false,
+    "global_input": false,
+    "focus_or_activation": false,
+    "cursor_movement": false,
+    "display_mode_changes": false
+  }
+}

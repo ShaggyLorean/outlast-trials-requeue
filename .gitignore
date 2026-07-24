@@ -1,0 +1,14 @@
+build/
+release/
+
+*.pak
+*.uasset
+*.uexp
+extracted/
+mod-staging/
+
+*.exe
+*.res
+*.o
+__pycache__/
+tools/
