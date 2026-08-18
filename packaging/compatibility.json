@@ -3,14 +3,14 @@
   "release": {
     "name": "Outlast Requeue",
     "author": "whispersgone",
-    "version": "1.0.2",
-    "release_date": "2026-07-22"
+    "version": "1.0.3",
+    "release_date": "2026-08-18"
   },
   "game": {
     "name": "The Outlast Trials",
     "store": "Steam",
     "steam_app_id": 1304930,
-    "last_verified_build_id": "24322931",
+    "last_verified_build_id": "24382135",
     "engine_family": "Unreal Engine 4.27",
     "strict_build_match": false
   },
@@ -33,7 +33,8 @@
     "exact_invasion_ticket_required": true,
     "matching_timeout_required": true,
     "new_ticket_confirmation_required": true,
-    "confirmation_timeout_ms": 15000,
+    "confirmation_timeout_ms": 25000,
+    "max_requeue_attempts": 3,
     "action_expiry_required": true,
     "blind_retry": false,
     "global_input": false,

@@ -23,10 +23,10 @@
 #define APP_NAME L"Outlast Requeue"
 #define APP_CLASS L"OutlastRequeue.Native.Window.v1"
 #define APP_MUTEX L"Local\\OutlastRequeue.Native.SingleInstance.v1"
-#define APP_VERSION L"1.0.2"
+#define APP_VERSION L"1.0.3"
 #define APP_AUTHOR L"whispersgone"
 #define STEAM_APP_ID L"1304930"
-#define SUPPORTED_BUILD_ID L"24322931"
+#define SUPPORTED_BUILD_ID L"24382135"
 #define GAME_EXE L"TOTClient-Win64-Shipping.exe"
 #define PAK_NAME L"zzz-OutlastRequeue_P.pak"
 #define EXPECTED_PAK_SHA256 \
@@ -47,11 +47,30 @@
 #define EVENT_LOG_MAX_LINES 400
 #define LINE_CAP (256 * 1024)
 #define LOG_PREFIX_CAP 4096
-#define LIVE_TIMEOUT_MAX_AGE_MS UINT64_C(5000)
-#define UNIX_EPOCH_PLAUSIBILITY_MS UINT64_C(1600000000000)
-#define ACTION_STAGE_MAX_LATENESS_MS UINT64_C(1000)
+#define LIVE_TIMEOUT_MAX_AGE_MS UINT64_C(15000)
 #define INVASION_TIMEOUT_MARKER "\"type\":\"timed_out\",\"context\":\"invasion\""
-#define SERVER_TIMESTAMP_MARKER "\"timestamp\":"
+
+/*
+ * The game narrates its own menu state.  Both edges of the Trial Board push
+ * transition are logged, and input is refused for the whole transition, so the
+ * requeue sequence follows those records instead of a fixed sleep.
+ */
+#define UI_BOARD_PUSH_MARKER "Menu page push transition starting: CharacterSheet_C"
+#define UI_BOARD_POP_MARKER "Menu page pop transition starting: CharacterSheet_C"
+#define UI_INPUTS_ENABLED_MARKER "Menu manager: enabling inputs"
+
+#define ACTION_TAB_ACK_TIMEOUT_MS UINT64_C(3000)
+#define ACTION_GATE_TIMEOUT_MS UINT64_C(6000)
+#define ACTION_CONFIRM_SETTLE_MS UINT64_C(500)
+/*
+ * Tab is accepted while the game sits unfocused in the Sleep Room, verified by
+ * posting one directly, but it is refused for some stretch after a matchmaking
+ * timeout.  Nothing in the log says when that clears, and every ignored press
+ * costs nothing, so the sequence keeps knocking for two minutes rather than
+ * giving up and leaving the player out of the queue.
+ */
+#define ACTION_MAX_TAB_TRIES 40u
+#define ACTION_NOTE_EVERY_TRIES 5u
 
 #define CLR_BG RGB(10, 11, 14)
 #define CLR_CARD RGB(22, 24, 30)
@@ -117,6 +136,14 @@ typedef struct app_state {
     bool quitting;
     unsigned generation;
     rq_engine engine;
+    uint64_t ui_board_push_ms;
+    uint64_t ui_board_pop_ms;
+    uint64_t ui_inputs_enabled_ms;
+    int action_phase;
+    int action_note;
+    unsigned action_tab_tries;
+    uint64_t action_tab_ms;
+    uint64_t action_gate_ms;
     uint64_t display_total_ms;
     uint32_t display_requeue_count;
     bool display_enabled;
@@ -155,29 +182,103 @@ static uint64_t wall_clock_ms(void)
     return (value.QuadPart - epoch_delta_100ns) / UINT64_C(10000);
 }
 
-static bool live_timeout_is_too_old(const char *line, uint64_t now_wall_ms)
+static uint64_t file_time_to_ms(const FILETIME *file_time)
 {
-    const char *digits;
-    char *end;
-    unsigned long long event_wall_ms;
+    ULARGE_INTEGER value;
+
+    value.LowPart = file_time->dwLowDateTime;
+    value.HighPart = file_time->dwHighDateTime;
+    return value.QuadPart / UINT64_C(10000);
+}
+
+static uint64_t local_clock_ms(void)
+{
+    SYSTEMTIME stamp;
+    FILETIME file_time;
+
+    GetLocalTime(&stamp);
+    if (!SystemTimeToFileTime(&stamp, &file_time)) {
+        return 0;
+    }
+    return file_time_to_ms(&file_time);
+}
+
+static bool read_fixed_digits(const char *text, size_t count, unsigned *output)
+{
+    unsigned value = 0;
+
+    for (size_t index = 0; index < count; ++index) {
+        if (!isdigit((unsigned char)text[index])) {
+            return false;
+        }
+        value = value * 10u + (unsigned)(text[index] - '0');
+    }
+    *output = value;
+    return true;
+}
+
+/* Read the engine's own "[2026.08.17-14.51.54:170]" prefix, in local time. */
+static bool parse_log_local_ms(const char *line, uint64_t *output)
+{
+    SYSTEMTIME stamp;
+    FILETIME file_time;
+    unsigned year;
+    unsigned month;
+    unsigned day;
+    unsigned hour;
+    unsigned minute;
+    unsigned second;
+    unsigned millisecond;
+
+    if (line == NULL || strlen(line) < 25 || line[0] != '[' ||
+        line[5] != '.' || line[8] != '.' || line[11] != '-' ||
+        line[14] != '.' || line[17] != '.' || line[20] != ':' ||
+        line[24] != ']') {
+        return false;
+    }
+    if (!read_fixed_digits(line + 1, 4, &year) ||
+        !read_fixed_digits(line + 6, 2, &month) ||
+        !read_fixed_digits(line + 9, 2, &day) ||
+        !read_fixed_digits(line + 12, 2, &hour) ||
+        !read_fixed_digits(line + 15, 2, &minute) ||
+        !read_fixed_digits(line + 18, 2, &second) ||
+        !read_fixed_digits(line + 21, 3, &millisecond)) {
+        return false;
+    }
+    ZeroMemory(&stamp, sizeof(stamp));
+    stamp.wYear = (WORD)year;
+    stamp.wMonth = (WORD)month;
+    stamp.wDay = (WORD)day;
+    stamp.wHour = (WORD)hour;
+    stamp.wMinute = (WORD)minute;
+    stamp.wSecond = (WORD)second;
+    stamp.wMilliseconds = (WORD)millisecond;
+    if (!SystemTimeToFileTime(&stamp, &file_time)) {
+        return false;
+    }
+    *output = file_time_to_ms(&file_time);
+    return true;
+}
+
+static bool live_timeout_is_too_old(const char *line, uint64_t now_local_ms)
+{
+    uint64_t written_local_ms = 0;
 
     if (strstr(line, INVASION_TIMEOUT_MARKER) == NULL) {
         return false;
     }
-    digits = strstr(line, SERVER_TIMESTAMP_MARKER);
-    if (digits == NULL) {
+    /*
+     * The record carries the matchmaking service clock.  Comparing that with
+     * the local clock disarms every single requeue on a machine whose time has
+     * drifted a few seconds, which is a silent and very confusing failure.  The
+     * game writes its own log prefix from this machine, so measuring against
+     * that leaves no room for clock skew at all.
+     */
+    if (!parse_log_local_ms(line, &written_local_ms) || now_local_ms == 0 ||
+        now_local_ms <= written_local_ms) {
         return false;
     }
-    digits += sizeof(SERVER_TIMESTAMP_MARKER) - 1;
-    if (!isdigit((unsigned char)*digits)) {
-        return false;
-    }
-    event_wall_ms = strtoull(digits, &end, 10);
-    if (end == digits || event_wall_ms < UNIX_EPOCH_PLAUSIBILITY_MS ||
-        now_wall_ms <= event_wall_ms) {
-        return false;
-    }
-    return now_wall_ms - event_wall_ms > LIVE_TIMEOUT_MAX_AGE_MS;
+    return now_local_ms - written_local_ms > LIVE_TIMEOUT_MAX_AGE_MS;
 }
 
 static bool file_exists(const wchar_t *path)
@@ -912,56 +1013,140 @@ static bool generation_is_enabled(unsigned generation)
     return enabled;
 }
 
-static bool wait_while_enabled(unsigned generation, DWORD delay_ms)
+/*
+ * The Trial Board refuses input for the whole push transition, measured at
+ * 1.26 to 1.32 seconds on a live client.  The previous fixed 1.2 second wait
+ * put F within a few milliseconds of that boundary, so the requeue landed on
+ * a disabled panel most of the time.  The sequence below is driven by the
+ * monitor loop instead: it posts Tab, waits for the game to log that the board
+ * is accepting input again, and only then posts F.  It never blocks the loop,
+ * because the loop is also what feeds it those records.
+ */
+enum action_phase {
+    ACTION_IDLE = 0,
+    ACTION_AWAIT_BOARD,
+    ACTION_AWAIT_GATE,
+    ACTION_SETTLE
+};
+
+enum action_step {
+    STEP_NONE = 0,
+    STEP_TAB,
+    STEP_CONFIRM,
+    STEP_ABANDON
+};
+
+enum action_note {
+    NOTE_NONE = 0,
+    NOTE_REOPEN,
+    NOTE_TAB_RETRY,
+    NOTE_GATE_ASSUMED
+};
+
+static bool post_key_to_game(UINT virtual_key, unsigned generation)
 {
-    uint64_t deadline = monotonic_ms() + delay_ms;
-    for (;;) {
-        uint64_t now = monotonic_ms();
-        uint64_t remaining;
-        if (now >= deadline) {
-            break;
-        }
-        remaining = deadline - now;
-        DWORD slice = remaining > 50 ? 50 : (DWORD)remaining;
-        if (WaitForSingleObject(g_app.stop_event, slice) == WAIT_OBJECT_0 ||
-            !generation_is_enabled(generation)) {
-            return false;
-        }
+    HWND game_window = find_game_window();
+
+    if (game_window == NULL) {
+        return false;
     }
-    return monotonic_ms() <= deadline + ACTION_STAGE_MAX_LATENESS_MS &&
-           generation_is_enabled(generation);
+    return post_targeted_key(game_window, virtual_key, generation);
 }
 
-static bool perform_targeted_requeue(unsigned generation,
-                                     uint64_t action_expires_mono_ms,
-                                     bool *expired)
+static void reset_action_sequence_locked(void)
 {
-    HWND game_window;
+    g_app.action_phase = ACTION_IDLE;
+    g_app.action_note = NOTE_NONE;
+    g_app.action_tab_tries = 0;
+    g_app.action_tab_ms = 0;
+    g_app.action_gate_ms = 0;
+}
 
-    *expired = false;
-    if (monotonic_ms() > action_expires_mono_ms ||
-        !generation_is_enabled(generation)) {
-        *expired = generation_is_enabled(generation);
-        return false;
+static int advance_action_sequence_locked(uint64_t now_ms)
+{
+    switch (g_app.action_phase) {
+    case ACTION_AWAIT_BOARD:
+        if (g_app.ui_board_push_ms > g_app.action_tab_ms) {
+            g_app.action_phase = ACTION_AWAIT_GATE;
+            return STEP_NONE;
+        }
+        /*
+         * Tab is a toggle.  A pop rather than a push means the board was
+         * already open and the press closed it, so it has to be reopened
+         * before F means anything at all.
+         */
+        if (g_app.ui_board_pop_ms > g_app.action_tab_ms ||
+            now_ms - g_app.action_tab_ms > ACTION_TAB_ACK_TIMEOUT_MS) {
+            if (g_app.action_tab_tries >= ACTION_MAX_TAB_TRIES) {
+                return STEP_ABANDON;
+            }
+            if (g_app.ui_board_pop_ms > g_app.action_tab_ms) {
+                g_app.action_note = NOTE_REOPEN;
+            } else if (g_app.action_tab_tries % ACTION_NOTE_EVERY_TRIES == 0) {
+                g_app.action_note = NOTE_TAB_RETRY;
+            }
+            return STEP_TAB;
+        }
+        return STEP_NONE;
+    case ACTION_AWAIT_GATE:
+        if (g_app.ui_inputs_enabled_ms > g_app.ui_board_push_ms) {
+            g_app.action_gate_ms = now_ms;
+            g_app.action_phase = ACTION_SETTLE;
+            return STEP_NONE;
+        }
+        if (now_ms - g_app.action_tab_ms > ACTION_GATE_TIMEOUT_MS) {
+            g_app.action_note = NOTE_GATE_ASSUMED;
+            g_app.action_gate_ms = now_ms;
+            g_app.action_phase = ACTION_SETTLE;
+        }
+        return STEP_NONE;
+    case ACTION_SETTLE:
+        if (now_ms - g_app.action_gate_ms >= ACTION_CONFIRM_SETTLE_MS) {
+            return STEP_CONFIRM;
+        }
+        return STEP_NONE;
+    default:
+        return STEP_NONE;
     }
-    game_window = find_game_window();
-    if (game_window == NULL || monotonic_ms() > action_expires_mono_ms ||
-        !generation_is_enabled(generation)) {
-        return false;
+}
+
+static void post_tab_failure_note(void)
+{
+    HWND game_window = find_game_window();
+    wchar_t message[STATUS_CAP];
+
+    if (game_window == NULL) {
+        post_ui_event(L"The exact Outlast window disappeared mid-sequence.");
+        return;
     }
-    if (!post_targeted_key(game_window, VK_TAB, generation)) {
-        return false;
+    if (SUCCEEDED(StringCchPrintfW(
+            message,
+            ARRAYSIZE(message),
+            L"Tab ignored for %u attempts over two minutes "
+            L"(window %ls and %ls).",
+            ACTION_MAX_TAB_TRIES,
+            IsIconic(game_window) ? L"minimized" : L"restored",
+            GetForegroundWindow() == game_window ? L"focused" : L"unfocused"))) {
+        post_ui_event(message);
     }
-    if (!wait_while_enabled(generation, 1200)) {
-        *expired = generation_is_enabled(generation);
-        return false;
+}
+
+static void post_action_note(int note)
+{
+    switch (note) {
+    case NOTE_REOPEN:
+        post_ui_event(L"Trial Board was already open; reopening it for F.");
+        break;
+    case NOTE_TAB_RETRY:
+        post_ui_event(L"Tab still not acknowledged; the game refuses it for "
+                      L"now, still trying.");
+        break;
+    case NOTE_GATE_ASSUMED:
+        post_ui_event(L"Board opened but never reported ready; sending F anyway.");
+        break;
+    default:
+        break;
     }
-    game_window = find_game_window();
-    if (game_window == NULL || monotonic_ms() > action_expires_mono_ms) {
-        *expired = game_window != NULL;
-        return false;
-    }
-    return post_targeted_key(game_window, (UINT)L'F', generation);
 }
 
 static bool get_file_identity(HANDLE file, file_identity *identity)
@@ -1040,8 +1225,11 @@ static void apply_engine_event_locked(const rq_event *event)
     case RQ_EVENT_REQUEUE_POSTED:
         set_status_locked(L"Requeue posted, waiting for server confirmation");
         break;
+    case RQ_EVENT_REQUEUE_RETRY:
+        set_status_locked(L"No ticket yet, preparing another targeted attempt");
+        break;
     case RQ_EVENT_REQUEUE_UNCONFIRMED:
-        set_status_locked(L"Requeue was not confirmed, no blind retry sent");
+        set_status_locked(L"Requeue was not confirmed, attempts exhausted");
         break;
     case RQ_EVENT_REQUEUE_EXPIRED:
         set_status_locked(L"Requeue timing window expired, no input sent");
@@ -1050,7 +1238,7 @@ static void apply_engine_event_locked(const rq_event *event)
         set_status_locked(L"Target game window unavailable, safely disarmed");
         break;
     case RQ_EVENT_REQUEUE_DUE:
-        set_status_locked(L"Posting targeted Tab → F sequence");
+        set_status_locked(L"Opening the Trial Board for a targeted requeue");
         break;
     case RQ_EVENT_NONE:
     default:
@@ -1083,8 +1271,11 @@ static void describe_engine_event(const rq_event *event)
     case RQ_EVENT_REQUEUE_POSTED:
         post_ui_event(L"Targeted Tab → F posted without activating the game.");
         break;
+    case RQ_EVENT_REQUEUE_RETRY:
+        post_ui_event(L"No replacement ticket in time; retrying the sequence.");
+        break;
     case RQ_EVENT_REQUEUE_UNCONFIRMED:
-        post_ui_event(L"No new ticket within 15 seconds; no blind retry.");
+        post_ui_event(L"No new Invasion ticket after the final attempt.");
         break;
     case RQ_EVENT_REQUEUE_EXPIRED:
         post_ui_event(L"The safe action window elapsed; no delayed input was sent.");
@@ -1104,11 +1295,22 @@ static void process_log_line(const char *line,
     rq_event event;
     uint64_t now_wall_ms = wall_clock_ms();
     EnterCriticalSection(&g_app.lock);
+    if (!initial_scan) {
+        uint64_t seen_ms = monotonic_ms();
+        if (strstr(line, UI_BOARD_PUSH_MARKER) != NULL) {
+            g_app.ui_board_push_ms = seen_ms;
+        } else if (strstr(line, UI_BOARD_POP_MARKER) != NULL) {
+            g_app.ui_board_pop_ms = seen_ms;
+        } else if (strstr(line, UI_INPUTS_ENABLED_MARKER) != NULL) {
+            g_app.ui_inputs_enabled_ms = seen_ms;
+        }
+    }
     if (!g_app.enabled || g_app.generation != generation) {
         LeaveCriticalSection(&g_app.lock);
         return;
     }
-    if (!initial_scan && live_timeout_is_too_old(line, now_wall_ms)) {
+    if (!initial_scan && strstr(line, INVASION_TIMEOUT_MARKER) != NULL &&
+        live_timeout_is_too_old(line, local_clock_ms())) {
         bool had_armed_ticket = g_app.engine.has_armed_ticket;
 
         event = rq_engine_process_line(&g_app.engine,
@@ -1237,62 +1439,90 @@ static bool recover_log(HANDLE file,
 static void tick_requeue(unsigned generation)
 {
     rq_event event;
-    bool action_due = false;
-    bool action_expired = false;
-    uint64_t action_expires_mono_ms = 0;
+    int step = STEP_NONE;
+    int note = NOTE_NONE;
+    uint64_t now_ms = monotonic_ms();
 
+    ZeroMemory(&event, sizeof(event));
     EnterCriticalSection(&g_app.lock);
-    if (g_app.enabled && g_app.generation == generation) {
-        event = rq_engine_tick(&g_app.engine, monotonic_ms());
-        apply_engine_event_locked(&event);
-        action_due = event.type == RQ_EVENT_REQUEUE_DUE;
-        if (action_due) {
-            action_expires_mono_ms =
-                g_app.engine.pending_due_mono_ms +
-                g_app.engine.action_max_lateness_ms;
-        }
-    } else {
-        ZeroMemory(&event, sizeof(event));
+    if (!g_app.enabled || g_app.generation != generation) {
+        reset_action_sequence_locked();
+        LeaveCriticalSection(&g_app.lock);
+        return;
     }
+    if (g_app.action_phase == ACTION_IDLE) {
+        event = rq_engine_tick(&g_app.engine, now_ms);
+        apply_engine_event_locked(&event);
+        if (event.type == RQ_EVENT_REQUEUE_DUE) {
+            g_app.action_phase = ACTION_AWAIT_BOARD;
+            g_app.action_tab_tries = 0;
+            g_app.action_tab_ms = now_ms;
+            step = STEP_TAB;
+        }
+    } else if (!g_app.engine.pending) {
+        /* The ticket resolved on its own, so no key belongs to it any more. */
+        reset_action_sequence_locked();
+    } else {
+        step = advance_action_sequence_locked(now_ms);
+    }
+    note = g_app.action_note;
+    g_app.action_note = NOTE_NONE;
     LeaveCriticalSection(&g_app.lock);
 
-    if (event.type == RQ_EVENT_REQUEUE_UNCONFIRMED ||
-        event.type == RQ_EVENT_REQUEUE_EXPIRED) {
-        describe_engine_event(&event);
-        (void)PostMessageW(g_app.window, WM_STATE_CHANGED, 0, 0);
-        return;
-    }
-    if (!action_due) {
-        return;
-    }
-    (void)PostMessageW(g_app.window, WM_STATE_CHANGED, 0, 0);
-    if (perform_targeted_requeue(
-            generation, action_expires_mono_ms, &action_expired)) {
-        EnterCriticalSection(&g_app.lock);
-        if (g_app.enabled && g_app.generation == generation) {
-            event = rq_engine_mark_requeue_posted(
-                &g_app.engine, monotonic_ms(), RQ_DEFAULT_VERIFY_TIMEOUT_MS);
-            apply_engine_event_locked(&event);
-        } else {
-            ZeroMemory(&event, sizeof(event));
-        }
-        LeaveCriticalSection(&g_app.lock);
-    } else {
-        EnterCriticalSection(&g_app.lock);
-        if (g_app.enabled && g_app.generation == generation) {
-            event = action_expired
-                        ? rq_engine_mark_requeue_expired(&g_app.engine)
-                        : rq_engine_mark_requeue_failed(&g_app.engine);
-            apply_engine_event_locked(&event);
-        } else {
-            ZeroMemory(&event, sizeof(event));
-        }
-        LeaveCriticalSection(&g_app.lock);
-    }
     if (event.type != RQ_EVENT_NONE) {
         describe_engine_event(&event);
         (void)PostMessageW(g_app.window, WM_STATE_CHANGED, 0, 0);
     }
+    post_action_note(note);
+    if (step == STEP_NONE) {
+        return;
+    }
+
+    ZeroMemory(&event, sizeof(event));
+    if (step == STEP_TAB) {
+        bool posted = post_key_to_game(VK_TAB, generation);
+
+        EnterCriticalSection(&g_app.lock);
+        if (!g_app.enabled || g_app.generation != generation) {
+            reset_action_sequence_locked();
+        } else if (posted) {
+            g_app.action_phase = ACTION_AWAIT_BOARD;
+            g_app.action_tab_ms = monotonic_ms();
+            ++g_app.action_tab_tries;
+        } else {
+            reset_action_sequence_locked();
+            event = rq_engine_mark_requeue_failed(&g_app.engine);
+            apply_engine_event_locked(&event);
+        }
+        LeaveCriticalSection(&g_app.lock);
+    } else if (step == STEP_CONFIRM) {
+        bool posted = post_key_to_game((UINT)L'F', generation);
+
+        EnterCriticalSection(&g_app.lock);
+        reset_action_sequence_locked();
+        if (g_app.enabled && g_app.generation == generation) {
+            event = posted ? rq_engine_mark_requeue_posted(
+                                 &g_app.engine,
+                                 monotonic_ms(),
+                                 RQ_DEFAULT_VERIFY_TIMEOUT_MS)
+                           : rq_engine_mark_requeue_failed(&g_app.engine);
+            apply_engine_event_locked(&event);
+        }
+        LeaveCriticalSection(&g_app.lock);
+    } else {
+        EnterCriticalSection(&g_app.lock);
+        reset_action_sequence_locked();
+        if (g_app.enabled && g_app.generation == generation) {
+            event = rq_engine_mark_requeue_failed(&g_app.engine);
+            apply_engine_event_locked(&event);
+        }
+        LeaveCriticalSection(&g_app.lock);
+        post_tab_failure_note();
+    }
+    if (event.type != RQ_EVENT_NONE) {
+        describe_engine_event(&event);
+    }
+    (void)PostMessageW(g_app.window, WM_STATE_CHANGED, 0, 0);
 }
 
 static DWORD WINAPI monitor_thread(void *unused)
@@ -2439,25 +2669,34 @@ static int run_self_test(void)
     if (event.type != RQ_EVENT_TIMEOUT || event.total_search_ms != 4000) {
         return 11;
     }
-    if (rq_engine_tick(&engine, 899).type != RQ_EVENT_NONE ||
-        rq_engine_tick(&engine, 900).type != RQ_EVENT_REQUEUE_DUE) {
+    if (rq_engine_tick(&engine, 2599).type != RQ_EVENT_NONE ||
+        rq_engine_tick(&engine, 2600).type != RQ_EVENT_REQUEUE_DUE) {
         return 12;
     }
-    event = rq_engine_mark_requeue_posted(&engine, 1000, 8000);
+    event = rq_engine_mark_requeue_posted(&engine, 3000, 8000);
     if (event.type != RQ_EVENT_REQUEUE_POSTED ||
-        rq_engine_tick(&engine, 8999).type != RQ_EVENT_NONE ||
-        rq_engine_tick(&engine, 9000).type != RQ_EVENT_REQUEUE_UNCONFIRMED) {
+        rq_engine_tick(&engine, 10999).type != RQ_EVENT_NONE ||
+        rq_engine_tick(&engine, 11000).type != RQ_EVENT_REQUEUE_RETRY) {
         return 13;
     }
-    if (!live_timeout_is_too_old(
-            "{\"type\":\"timed_out\",\"context\":\"invasion\","
-            "\"timestamp\":1600000000000}",
-            UINT64_C(1600000005001)) ||
-        live_timeout_is_too_old(
-            "{\"type\":\"timed_out\",\"context\":\"invasion\","
-            "\"timestamp\":1600000000000}",
-            UINT64_C(1600000005000))) {
-        return 14;
+    engine.requeue_attempt = engine.max_requeue_attempts;
+    engine.pending_phase = RQ_PENDING_VERIFYING;
+    engine.pending_verify_until_mono_ms = 12000;
+    if (rq_engine_tick(&engine, 12000).type != RQ_EVENT_REQUEUE_UNCONFIRMED) {
+        return 15;
+    }
+    {
+        const char *stale =
+            "[2026.08.17-14.51.54:170][859]OnlineCoreLogs: RTA: "
+            "{\"type\":\"timed_out\",\"context\":\"invasion\"}";
+        uint64_t written = 0;
+
+        if (!parse_log_local_ms(stale, &written) ||
+            !live_timeout_is_too_old(stale,
+                                     written + LIVE_TIMEOUT_MAX_AGE_MS + 1) ||
+            live_timeout_is_too_old(stale, written + LIVE_TIMEOUT_MAX_AGE_MS)) {
+            return 14;
+        }
     }
     cli_print(L"SELF_TEST_PASS\r\n");
     return 0;

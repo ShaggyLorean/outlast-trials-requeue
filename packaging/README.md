@@ -1,4 +1,4 @@
-# Outlast Requeue 1.0.2
+# Outlast Requeue 1.0.3
 
 Created by **whispersgone**.
 
@@ -60,8 +60,9 @@ matched by process image identity before anything is posted.
 The PAK does not monitor matchmaking and cannot requeue by itself. It redirects
 the existing Trial Board `F` action to the real Invasion start path. The desktop
 application detects the exact timeout, posts targeted `Tab`, waits for the
-timeout interface, and invokes the patched `F` action. A newly created Invasion
-ticket must appear in the game log within the 15-second confirmation window.
+game to report that the Trial Board is accepting input again, and only then
+invokes the patched `F` action. A newly created Invasion ticket must appear in
+the game log within the 25-second confirmation window.
 
 ## Platform instructions
 

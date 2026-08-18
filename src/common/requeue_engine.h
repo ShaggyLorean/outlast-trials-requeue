@@ -17,9 +17,19 @@ extern "C" {
 #endif
 
 #define RQ_TICKET_CAPACITY 128
-#define RQ_DEFAULT_TIMEOUT_UI_DELAY_MS UINT64_C(800)
-#define RQ_DEFAULT_VERIFY_TIMEOUT_MS UINT64_C(15000)
-#define RQ_DEFAULT_ACTION_MAX_LATENESS_MS UINT64_C(3000)
+/*
+ * Measured against a live 4.27 client log.  The client only processes the
+ * server timeout about one second after the record it is derived from, and the
+ * party cleanup that follows it runs for another second, so anything posted
+ * before that lands while the Invasion panel still believes it is searching.
+ */
+#define RQ_DEFAULT_TIMEOUT_UI_DELAY_MS UINT64_C(2500)
+/* Observed replacement tickets appear five to eight seconds after the press. */
+#define RQ_DEFAULT_VERIFY_TIMEOUT_MS UINT64_C(25000)
+#define RQ_DEFAULT_ACTION_MAX_LATENESS_MS UINT64_C(8000)
+/* A silent miss leaves the player out of the queue, so attempts are repeated. */
+#define RQ_DEFAULT_MAX_REQUEUE_ATTEMPTS UINT32_C(3)
+#define RQ_DEFAULT_REQUEUE_RETRY_DELAY_MS UINT64_C(3000)
 
 typedef enum rq_event_type {
     RQ_EVENT_NONE = 0,
@@ -30,6 +40,7 @@ typedef enum rq_event_type {
     RQ_EVENT_DISCONNECTED,
     RQ_EVENT_REQUEUE_DUE,
     RQ_EVENT_REQUEUE_POSTED,
+    RQ_EVENT_REQUEUE_RETRY,
     RQ_EVENT_REQUEUE_UNCONFIRMED,
     RQ_EVENT_REQUEUE_EXPIRED,
     RQ_EVENT_HELPER_FAILED
@@ -75,9 +86,13 @@ typedef struct rq_engine {
     char awaiting_ticket[RQ_TICKET_CAPACITY];
     bool finished;
 
+    uint32_t requeue_attempt;
+
     uint64_t timeout_ui_delay_ms;
     uint64_t verify_timeout_ms;
     uint64_t action_max_lateness_ms;
+    uint32_t max_requeue_attempts;
+    uint64_t requeue_retry_delay_ms;
 } rq_engine;
 
 void rq_engine_init(rq_engine *engine);

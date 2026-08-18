@@ -3,7 +3,7 @@
   <assemblyIdentity
       name="OutlastRequeue"
       processorArchitecture="amd64"
-      version="1.0.2.0"
+      version="1.0.3.0"
       type="win32" />
   <description>Outlast Requeue</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Environment overrides:
-#   VERSION             Release version (default: 1.0.2)
+#   VERSION             Release version (default: 1.0.3)
 #   WINDOWS_EXE         Cross-built native executable
 #   PAK_FILE            PAK bundled with the Windows archive
 #   DIST_DIR            Output directory
@@ -11,7 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-VERSION="${VERSION:-1.0.2}"
+VERSION="${VERSION:-1.0.3}"
 PLATFORMS="${PLATFORMS:-windows source}"
 WINDOWS_EXE="${WINDOWS_EXE:-$ROOT_DIR/build/windows/OutlastRequeue.exe}"
 PAK_FILE="${PAK_FILE:-$ROOT_DIR/assets/zzz-OutlastRequeue_P.pak}"
@@ -19,8 +19,8 @@ DIST_DIR="${DIST_DIR:-$ROOT_DIR/release}"
 
 PAK_NAME="zzz-OutlastRequeue_P.pak"
 EXPECTED_PAK_SHA256="1998125961ea66886ae41d71fe15ec2d555d045b980bc487ac5a6ea2a92d0c54"
-EXPECTED_BUILD_ID="24322931"
-EXPECTED_VERIFY_TIMEOUT_MS="15000"
+EXPECTED_BUILD_ID="24382135"
+EXPECTED_VERIFY_TIMEOUT_MS="25000"
 EXPECTED_AUTHOR="whispersgone"
 CREATED_ARCHIVES=()
 

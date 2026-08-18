@@ -186,6 +186,8 @@ void rq_engine_init(rq_engine *engine)
     engine->timeout_ui_delay_ms = RQ_DEFAULT_TIMEOUT_UI_DELAY_MS;
     engine->verify_timeout_ms = RQ_DEFAULT_VERIFY_TIMEOUT_MS;
     engine->action_max_lateness_ms = RQ_DEFAULT_ACTION_MAX_LATENESS_MS;
+    engine->max_requeue_attempts = RQ_DEFAULT_MAX_REQUEUE_ATTEMPTS;
+    engine->requeue_retry_delay_ms = RQ_DEFAULT_REQUEUE_RETRY_DELAY_MS;
 }
 
 rq_event rq_engine_process_line(rq_engine *engine,
@@ -295,6 +297,7 @@ rq_event rq_engine_process_line(rq_engine *engine,
 
         engine->pending = true;
         engine->pending_phase = RQ_PENDING_DELAY;
+        engine->requeue_attempt = 0;
         copy_string(
             engine->pending_ticket, sizeof(engine->pending_ticket), ticket);
         engine->pending_due_mono_ms =
@@ -403,6 +406,20 @@ rq_event rq_engine_tick(rq_engine *engine, uint64_t now_mono_ms)
         if (now_mono_ms < engine->pending_verify_until_mono_ms) {
             return event;
         }
+        /*
+         * The posted sequence produced no replacement ticket.  Giving up here
+         * leaves the player with nothing in the queue at all, which is worse
+         * than one more targeted attempt on the same timed-out ticket.
+         */
+        if (engine->requeue_attempt < engine->max_requeue_attempts) {
+            engine->pending_phase = RQ_PENDING_DELAY;
+            engine->pending_due_mono_ms = saturating_add(
+                now_mono_ms, engine->requeue_retry_delay_ms);
+            engine->pending_verify_until_mono_ms = 0;
+            event = base_state_event(engine, RQ_EVENT_REQUEUE_RETRY);
+            event_set_ticket(&event, engine->pending_ticket);
+            return event;
+        }
         event = base_state_event(engine, RQ_EVENT_REQUEUE_UNCONFIRMED);
         event_set_ticket(&event, engine->pending_ticket);
         clear_pending(engine);
@@ -439,6 +456,7 @@ rq_event rq_engine_mark_requeue_posted(rq_engine *engine,
     }
     event = base_state_event(engine, RQ_EVENT_REQUEUE_POSTED);
     event_set_ticket(&event, engine->pending_ticket);
+    engine->requeue_attempt = increment_count(engine->requeue_attempt);
     engine->pending_phase = RQ_PENDING_VERIFYING;
     engine->verify_timeout_ms = verify_timeout_ms;
     engine->pending_verify_until_mono_ms =
@@ -507,6 +525,8 @@ const char *rq_event_type_name(rq_event_type type)
         return "requeue_due";
     case RQ_EVENT_REQUEUE_POSTED:
         return "requeue_posted";
+    case RQ_EVENT_REQUEUE_RETRY:
+        return "requeue_retry";
     case RQ_EVENT_REQUEUE_UNCONFIRMED:
         return "requeue_unconfirmed";
     case RQ_EVENT_REQUEUE_EXPIRED:

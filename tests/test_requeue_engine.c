@@ -70,7 +70,8 @@ static void test_matching_ticket_and_stale_timeout(void)
     CHECK(engine.awaiting_requeue_search);
     CHECK(engine.pending);
     CHECK(engine.pending_phase == RQ_PENDING_DELAY);
-    CHECK(engine.pending_due_mono_ms == 900);
+    CHECK(engine.pending_due_mono_ms ==
+          100 + RQ_DEFAULT_TIMEOUT_UI_DELAY_MS);
 }
 
 static void test_ticket_exact_terminal_and_duplicate_safety(void)
@@ -197,6 +198,7 @@ static void test_pending_lifecycle(void)
     rq_engine_init(&engine);
     engine.timeout_ui_delay_ms = 80;
     engine.verify_timeout_ms = 200;
+    engine.max_requeue_attempts = 0;
     (void)line(&engine, "searching", "a", 100, false, 0);
     (void)line(&engine, "timed_out", "a", 200, false, 1000);
 
@@ -443,16 +445,17 @@ static void test_observed_delayed_ticket_confirmation(void)
 
     /*
      * A captured live cycle produced its replacement ticket 10.679 seconds
-     * after timeout.  Tab/F completes around 2.16 seconds, so an eight-second
-     * post-action deadline expired about half a second too early.  The current
-     * confirmation window must preserve that valid requeue chain.
+     * after timeout.  The confirmation window must preserve that valid requeue
+     * chain, and the default pre-action delay now clears the client-side
+     * timeout handling instead of racing it.
      */
     rq_engine_init(&engine);
     (void)line(&engine, "searching", "slow-a", 1000, false, 0);
     (void)line(&engine, "timed_out", "slow-a", 301000, false, 0);
-    CHECK(rq_engine_tick(&engine, 800).type == RQ_EVENT_REQUEUE_DUE);
+    CHECK(rq_engine_tick(&engine, 2499).type == RQ_EVENT_NONE);
+    CHECK(rq_engine_tick(&engine, 2500).type == RQ_EVENT_REQUEUE_DUE);
     CHECK(rq_engine_mark_requeue_posted(
-              &engine, 2160, RQ_DEFAULT_VERIFY_TIMEOUT_MS)
+              &engine, 4400, RQ_DEFAULT_VERIFY_TIMEOUT_MS)
               .type == RQ_EVENT_REQUEUE_POSTED);
     CHECK(rq_engine_tick(&engine, 10679).type == RQ_EVENT_NONE);
 
@@ -461,6 +464,65 @@ static void test_observed_delayed_ticket_confirmation(void)
     CHECK(event.requeue_confirmed);
     CHECK(event.cumulative_before_ms == 300000);
     CHECK(event.requeue_count == 1);
+}
+
+static void test_requeue_retries_before_reporting_a_miss(void)
+{
+    rq_engine engine;
+    rq_event event;
+
+    /*
+     * A missed press used to end the cycle outright, which left the player
+     * with nothing in the queue while the tool still looked armed.  That is
+     * worse than one more targeted attempt on the same timed-out ticket.
+     */
+    rq_engine_init(&engine);
+    engine.timeout_ui_delay_ms = 100;
+    engine.verify_timeout_ms = 1000;
+    engine.max_requeue_attempts = 2;
+    engine.requeue_retry_delay_ms = 500;
+    (void)line(&engine, "searching", "a", 100, false, 0);
+    (void)line(&engine, "timed_out", "a", 200, false, 1000);
+
+    CHECK(rq_engine_tick(&engine, 1100).type == RQ_EVENT_REQUEUE_DUE);
+    CHECK(rq_engine_mark_requeue_posted(&engine, 1100, 1000).type ==
+          RQ_EVENT_REQUEUE_POSTED);
+    CHECK(engine.requeue_attempt == 1);
+
+    event = rq_engine_tick(&engine, 2100);
+    CHECK(event.type == RQ_EVENT_REQUEUE_RETRY);
+    CHECK(strcmp(event.ticket, "a") == 0);
+    CHECK(engine.pending && engine.awaiting_requeue_search);
+    CHECK(engine.pending_phase == RQ_PENDING_DELAY);
+    CHECK(engine.pending_due_mono_ms == 2600);
+
+    CHECK(rq_engine_tick(&engine, 2600).type == RQ_EVENT_REQUEUE_DUE);
+    CHECK(rq_engine_mark_requeue_posted(&engine, 2600, 1000).type ==
+          RQ_EVENT_REQUEUE_POSTED);
+    CHECK(engine.requeue_attempt == 2);
+
+    event = rq_engine_tick(&engine, 3600);
+    CHECK(event.type == RQ_EVENT_REQUEUE_UNCONFIRMED);
+    CHECK(!engine.pending && !engine.awaiting_requeue_search);
+
+    /* A ticket that arrives after a retry is still one requeue, not two. */
+    rq_engine_init(&engine);
+    engine.timeout_ui_delay_ms = 100;
+    engine.verify_timeout_ms = 1000;
+    engine.requeue_retry_delay_ms = 500;
+    (void)line(&engine, "searching", "a", 100, false, 0);
+    (void)line(&engine, "timed_out", "a", 200, false, 1000);
+    (void)rq_engine_tick(&engine, 1100);
+    (void)rq_engine_mark_requeue_posted(&engine, 1100, 1000);
+    CHECK(rq_engine_tick(&engine, 2100).type == RQ_EVENT_REQUEUE_RETRY);
+    CHECK(rq_engine_tick(&engine, 2600).type == RQ_EVENT_REQUEUE_DUE);
+    (void)rq_engine_mark_requeue_posted(&engine, 2600, 1000);
+    event = line(&engine, "searching", "b", 300, false, 3000);
+    CHECK(event.type == RQ_EVENT_SEARCHING);
+    CHECK(event.requeue_confirmed);
+    CHECK(event.requeue_count == 1);
+    CHECK(strcmp(rq_event_type_name(RQ_EVENT_REQUEUE_RETRY),
+                 "requeue_retry") == 0);
 }
 
 int main(void)
@@ -478,6 +540,7 @@ int main(void)
     test_unknown_ticket_matches_python_semantics();
     test_event_names_and_disarm();
     test_observed_delayed_ticket_confirmation();
+    test_requeue_retries_before_reporting_a_miss();
     printf("requeue_engine: %u assertions passed\n", assertions);
     return EXIT_SUCCESS;
 }

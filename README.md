@@ -6,7 +6,7 @@ touching global input.
 
 ![The application in standby and in its armed state](docs/screenshot.png)
 
-Created by whispersgone. Version 1.0.2, Windows x64.
+Created by whispersgone. Version 1.0.3, Windows x64.
 
 ## The problem
 
@@ -27,10 +27,20 @@ tracks one Invasion ticket at a time:
 1. You start the first Imposter search yourself. The application sees the
    `context=invasion` search event and arms that exact ticket ID.
 2. When a `type=timed_out` event arrives for that same ticket, and only then,
-   it posts `Tab` to the game window, waits for the timeout interface, and
-   posts `F`.
-3. A new Invasion ticket has to appear in the log within 15 seconds. If it does
-   not, the application stops and waits for you. It never retries blindly.
+   it lets the client finish handling that timeout, posts `Tab` to the game
+   window, and waits for the game to log that the Trial Board is accepting
+   input again before posting `F`. The board refuses input for the whole push
+   transition, so a fixed delay lands on that boundary and the press is lost.
+   If the board was already open, the first `Tab` closes it and the log says
+   so, and the application simply opens it again.
+3. A new Invasion ticket has to appear in the log within 25 seconds. If it does
+   not, the same sequence is repeated, up to three attempts on that one ticket,
+   and then the application stops and waits for you. Nothing is ever posted
+   without a timed-out ticket to justify it.
+
+The game refuses `Tab` for a while after a matchmaking timeout, so an
+unacknowledged press is reposted every three seconds for up to two minutes. An
+ignored press costs nothing, and the log says plainly when one lands.
 
 Both key messages go to one specific window: the visible `UnrealWindow` whose
 process image matches the executable inside the game folder it discovered. The

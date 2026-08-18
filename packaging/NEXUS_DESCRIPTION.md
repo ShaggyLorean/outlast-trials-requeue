@@ -5,7 +5,7 @@ Created by **whispersgone**.
 Outlast Requeue restores an Invasion/Imposter search after the game's real
 server-side matchmaking ticket times out. It watches `OPP.log`, arms the exact
 active Invasion ticket, performs one targeted requeue after a matching timeout,
-and requires a new ticket within 15 seconds.
+and requires a new ticket within 25 seconds.
 
 It does **not** move you forward in matchmaking, change role probability,
 modify regions, or contact matchmaking servers directly. Start the first
@@ -24,7 +24,7 @@ Imposter search manually.
 - No global keyboard or mouse input
 - No cursor movement
 - No fullscreen, borderless, resolution, or display changes
-- No blind retries
+- Retries only the ticket that timed out
 - No delayed action after sleep/resume, a worker stall, or a stale log event
 - No service and no automatic startup
 - Exact PAK SHA-256 required
