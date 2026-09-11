@@ -270,6 +270,7 @@ typedef struct app_state {
 static app_state g_app;
 
 static void apply_topmost(bool topmost);
+static int scale_ui(int value);
 static void set_expanded(bool expanded);
 static void apply_window_region(int width, int height);
 static void set_window_alpha(BYTE alpha);
