@@ -6,7 +6,7 @@ moves your cursor, never uses global input, and touches no game file.
 
 ![The application in standby and in its armed state](docs/screenshot.png)
 
-Created by whispersgone. Version 1.0.4, Windows x64.
+Created by whispersgone. Version 2.0.0, Windows x64.
 
 The application is a small floating widget. Collapsed, it shows the state,
 the search timer, and the requeue count; rest the pointer on it to open the

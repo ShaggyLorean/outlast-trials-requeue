@@ -2,8 +2,16 @@
 
 All notable changes to Outlast Requeue are documented here.
 
-## 1.0.4 (2026-09-11)
+## 2.0.0 (2026-09-11)
 
+The requeue works in a completely different way, nothing from the PAK era
+survives, and the interface is new, so this is a major version.
+
+- Verified hands-off on game build `25112110`: timeout record at 14:00:46.7,
+  Trial Board open at +2.7 s, board ready at +4.0 s, START clicked at +4.5 s,
+  board closed by the game at +5.2 s, replacement ticket at +12.4 s. The player
+  was in another window the whole time and the pointer never moved. START was
+  detected at 458, 1274 in a 2560 by 1440 client.
 - The PAK is gone. Game build `25112110` (7.1) checks every mounted PAK
   against a whitelist and its anti-cheat reports any unknown one, so the
   patched `F` binding stopped being an option. Nothing in the game folder is

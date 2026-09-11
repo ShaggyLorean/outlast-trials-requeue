@@ -22,7 +22,7 @@
 #define APP_NAME L"Outlast Requeue"
 #define APP_CLASS L"OutlastRequeue.Native.Window.v1"
 #define APP_MUTEX L"Local\\OutlastRequeue.Native.SingleInstance.v1"
-#define APP_VERSION L"1.0.4"
+#define APP_VERSION L"2.0.0"
 #define APP_AUTHOR L"whispersgone"
 #define STEAM_APP_ID L"1304930"
 #define SUPPORTED_BUILD_ID L"25112110"

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Environment overrides:
-#   VERSION             Release version (default: 1.0.4)
+#   VERSION             Release version (default: 2.0.0)
 #   WINDOWS_EXE         Built native executable
 #   DIST_DIR            Output directory
 #   PLATFORMS           Space-separated list: "windows", "source", or both
@@ -12,7 +12,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-VERSION="${VERSION:-1.0.4}"
+VERSION="${VERSION:-2.0.0}"
 PLATFORMS="${PLATFORMS:-windows source}"
 WINDOWS_EXE="${WINDOWS_EXE:-$ROOT_DIR/build/windows/OutlastRequeue.exe}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/release}"
@@ -210,6 +210,8 @@ build_source_archive() {
         assets/outlast-requeue.ico
         assets/outlast-requeue.png
         docs/screenshot.png
+        docs/widget-compact.png
+        docs/widget-expanded.png
         src/common/requeue_engine.c
         src/common/requeue_engine.h
         src/windows/Makefile

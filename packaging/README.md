@@ -1,4 +1,4 @@
-# Outlast Requeue 1.0.4
+# Outlast Requeue 2.0.0
 
 Created by **whispersgone**.
 
