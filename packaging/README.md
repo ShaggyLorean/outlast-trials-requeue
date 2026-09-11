@@ -34,8 +34,8 @@ See `compatibility.json` for machine-readable compatibility metadata.
 The first search is always manual. The board remembers the selection, so the
 application only ever presses START. It acts only after the game log contains
 a matching `context=invasion`, `type=timed_out` event for the exact ticket it
-armed. Replayed or stale search, success, or cancel events are ignored. It
-stops after a confirmed Invasion match succeeds.
+armed. Replayed or stale search, success, or cancel events are ignored. After
+a confirmed Invasion match it waits for the next manual search.
 
 ## How the click works
 

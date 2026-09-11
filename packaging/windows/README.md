@@ -27,8 +27,9 @@ and pick the folder that contains `OPP`.
 - Drag it anywhere; the position is remembered. It never takes keyboard focus.
 - It floats above other windows, including the game, while you queue. When a
   match is found it counts down ten seconds, then minimizes to the taskbar and
-  stops floating. Restore it from the taskbar or enable auto-requeue to bring
-  it back on top.
+  stops floating. It hides whenever a trial map loads and returns on its own
+  when the Sleep Room loads. Auto-requeue stays enabled across matches; start
+  the next Imposter search yourself and it arms again.
 - The X icon exits the application completely.
 
 There is no tray icon and nothing keeps running in the background after the

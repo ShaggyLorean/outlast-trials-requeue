@@ -11,7 +11,9 @@ Created by whispersgone. Version 1.0.4, Windows x64.
 The application is a small floating widget. Collapsed, it shows the state,
 the search timer, and the requeue count; rest the pointer on it to open the
 full panel, pin it to keep it open, drag it anywhere. When a match is found
-it counts down ten seconds, then minimizes and stops floating.
+it counts down ten seconds, then minimizes and stops floating; it hides for
+every match and returns on its own in the Sleep Room. Auto-requeue stays
+enabled across matches.
 
 ## The problem
 

@@ -50,8 +50,9 @@ log records and the Trial Board layout only.
 The app is a small floating widget: state, search timer, and requeue count in
 a strip, the full panel when the pointer rests on it. Search time is
 cumulative across the entire verified requeue chain. When an Invasion match is
-found the widget counts down ten seconds, then minimizes and stops floating.
-The X icon exits the application completely.
+found the widget counts down ten seconds, then minimizes and stops floating;
+it hides for every match and returns on its own in the Sleep Room. Auto-requeue
+stays enabled across matches. The X icon exits the application completely.
 
 ## Important notice
 

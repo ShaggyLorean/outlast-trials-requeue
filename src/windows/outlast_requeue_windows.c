@@ -56,6 +56,14 @@
 #define UI_BOARD_PUSH_MARKER "Menu page push transition starting: CharacterSheet_C"
 #define UI_BOARD_POP_MARKER "Menu page pop transition starting: CharacterSheet_C"
 #define UI_INPUTS_ENABLED_MARKER "Menu manager: enabling inputs"
+/*
+ * Map loads say where the player is.  A trial map means a match is running
+ * and the widget gets out of the way; the lobby map means the Sleep Room,
+ * where it comes back.
+ */
+#define MAP_LOAD_MARKER "LogLoad: LoadMap: "
+#define MAP_TRIAL_MARKER "/Game/Maps/Global/OPP_Persistent"
+#define MAP_LOBBY_MARKER "/Game/Maps/Lobby/Lobby_Persistent"
 
 #define ACTION_TAB_ACK_TIMEOUT_MS UINT64_C(3000)
 #define ACTION_GATE_TIMEOUT_MS UINT64_C(6000)
@@ -197,6 +205,10 @@ typedef struct app_state {
      * and stops floating above other windows.  It floats only while armed.
      */
     bool hide_request;
+    bool hide_now_request;
+    bool restore_request;
+    bool auto_hidden;
+    bool in_trial_map;
     int hide_countdown;
     HICON icon;
     HFONT fonts[F_COUNT];
@@ -1606,11 +1618,9 @@ static void apply_engine_event_locked(const rq_event *event)
     case RQ_EVENT_SUCCEEDED:
         g_app.search_live = false;
         g_app.display_total_ms = event->total_search_ms;
-        g_app.enabled = false;
-        ++g_app.generation;
         g_app.hide_request = true;
         g_app.ui_state = UI_STATE_DONE;
-        set_status_locked(L"Match found, automation stopped");
+        set_status_locked(L"Match found, back in the Sleep Room later");
         break;
     case RQ_EVENT_CANCELED:
         g_app.search_live = false;
@@ -1668,7 +1678,8 @@ static void describe_engine_event(const rq_event *event)
         post_ui_event(L"The armed Invasion ticket timed out.");
         break;
     case RQ_EVENT_SUCCEEDED:
-        post_ui_event(L"Invasion match found; automation stopped.");
+        post_ui_event(L"Invasion match found. Start the next search yourself "
+                      L"after the match.");
         break;
     case RQ_EVENT_CANCELED:
         post_ui_event(L"Invasion search canceled; nothing armed.");
@@ -1703,6 +1714,13 @@ static void process_log_line(const char *line,
     rq_event event;
     uint64_t now_wall_ms = wall_clock_ms();
     EnterCriticalSection(&g_app.lock);
+    if (strstr(line, MAP_LOAD_MARKER) != NULL) {
+        if (strstr(line, MAP_TRIAL_MARKER) != NULL) {
+            g_app.in_trial_map = true;
+        } else if (strstr(line, MAP_LOBBY_MARKER) != NULL) {
+            g_app.in_trial_map = false;
+        }
+    }
     if (!initial_scan) {
         uint64_t seen_ms = monotonic_ms();
         if (strstr(line, UI_BOARD_PUSH_MARKER) != NULL) {
@@ -1711,6 +1729,12 @@ static void process_log_line(const char *line,
             g_app.ui_board_pop_ms = seen_ms;
         } else if (strstr(line, UI_INPUTS_ENABLED_MARKER) != NULL) {
             g_app.ui_inputs_enabled_ms = seen_ms;
+        } else if (strstr(line, MAP_LOAD_MARKER) != NULL) {
+            if (strstr(line, MAP_TRIAL_MARKER) != NULL) {
+                g_app.hide_now_request = true;
+            } else if (strstr(line, MAP_LOBBY_MARKER) != NULL) {
+                g_app.restore_request = true;
+            }
         }
     }
     if (!g_app.enabled || g_app.generation != generation) {
@@ -1834,6 +1858,11 @@ static bool recover_log(HANDLE file,
     }
     recovered = rq_engine_recovery_event(&g_app.engine);
     apply_engine_event_locked(&recovered);
+    if (g_app.in_trial_map) {
+        g_app.hide_now_request = true;
+    } else {
+        g_app.restore_request = true;
+    }
     if (recovered.type == RQ_EVENT_NONE) {
         g_app.ui_state = UI_STATE_ARMED;
         set_status_locked(L"Armed, start the first Imposter search yourself");
@@ -2092,6 +2121,30 @@ static uint64_t current_elapsed_locked(void)
     return g_app.display_total_ms;
 }
 
+/* Get out of the way for a match: minimize and stop floating. */
+static void hide_widget(void)
+{
+    if (g_app.window == NULL || g_app.auto_hidden) {
+        return;
+    }
+    g_app.auto_hidden = true;
+    apply_topmost(false);
+    ShowWindow(g_app.window, SW_MINIMIZE);
+    post_ui_event(L"Match running; the widget is hidden until the Sleep Room.");
+}
+
+/* Back in the Sleep Room: return without taking focus from the game. */
+static void restore_widget(void)
+{
+    if (g_app.window == NULL || !g_app.auto_hidden) {
+        return;
+    }
+    g_app.auto_hidden = false;
+    ShowWindow(g_app.window, SW_SHOWNOACTIVATE);
+    apply_topmost(true);
+    post_ui_event(L"Back in the Sleep Room; the widget is visible again.");
+}
+
 static void refresh_ui(void)
 {
     bool enabled;
@@ -2100,6 +2153,8 @@ static void refresh_ui(void)
     uint32_t attempt;
     uint32_t attempts_max;
     bool pending;
+    bool hide_now;
+    bool restore;
     start_button start;
 
     EnterCriticalSection(&g_app.lock);
@@ -2116,7 +2171,17 @@ static void refresh_ui(void)
         g_app.hide_request = false;
         g_app.hide_countdown = HIDE_COUNTDOWN_SECONDS;
     }
+    hide_now = g_app.hide_now_request;
+    restore = g_app.restore_request;
+    g_app.hide_now_request = false;
+    g_app.restore_request = false;
     LeaveCriticalSection(&g_app.lock);
+    if (hide_now) {
+        g_app.hide_countdown = 0;
+        hide_widget();
+    } else if (restore) {
+        restore_widget();
+    }
     if (g_app.hide_countdown > 0) {
         (void)StringCchPrintfW(g_app.disp_status,
                                STATUS_CAP,
@@ -2227,6 +2292,7 @@ static void set_enabled(bool enabled)
     LeaveCriticalSection(&g_app.lock);
     g_app.hide_countdown = 0;
     if (enabled) {
+        g_app.auto_hidden = false;
         apply_topmost(true);
     }
     SetEvent(g_app.wake_event);
@@ -3102,10 +3168,7 @@ static LRESULT CALLBACK window_procedure(HWND window,
                 refresh_game_presence();
             }
             if (g_app.hide_countdown > 0 && --g_app.hide_countdown == 0) {
-                apply_topmost(false);
-                ShowWindow(window, SW_MINIMIZE);
-                post_ui_event(L"Hidden after the match; the widget floats "
-                              L"again when auto-requeue is enabled.");
+                hide_widget();
             }
             refresh_ui();
         } else if (wparam == TIMER_COLLAPSE) {
@@ -3143,7 +3206,8 @@ static LRESULT CALLBACK window_procedure(HWND window,
                          0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         } else if (IsWindowVisible(window)) {
-            /* Restored from the taskbar on purpose, so it floats again. */
+            /* Restored on purpose, so it floats again. */
+            g_app.auto_hidden = false;
             apply_topmost(true);
         }
         return 0;

@@ -30,8 +30,10 @@ All notable changes to Outlast Requeue are documented here.
   It collapses again when the pointer leaves, unless pinned. Drag it anywhere;
   the position is remembered. It never takes keyboard focus.
 - When a match is found the widget counts down ten seconds, then minimizes to
-  the taskbar and stops floating above other windows. Restoring it from the
-  taskbar or enabling auto-requeue makes it float again.
+  the taskbar and stops floating above other windows. It also hides as soon as
+  the game loads a trial map, armed or not, and comes back on its own when
+  the Sleep Room loads, without taking focus from the game. Auto-requeue stays
+  enabled across matches; start the next search yourself and it arms again.
 - The search timer runs on the monotonic clock from the moment the searching
   record is seen. It used to compare the matchmaking service clock with the
   local clock, so a machine whose time was a few seconds behind showed 00:00
