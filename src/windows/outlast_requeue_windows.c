@@ -210,6 +210,8 @@ typedef struct app_state {
     bool auto_hidden;
     bool in_trial_map;
     int hide_countdown;
+    /* Top-left corner of the collapsed strip; the only geometry that is kept. */
+    POINT origin;
     HICON icon;
     HFONT fonts[F_COUNT];
     HBRUSH background_brush;
@@ -268,6 +270,9 @@ typedef struct app_state {
 static app_state g_app;
 
 static void apply_topmost(bool topmost);
+static void set_expanded(bool expanded);
+static void apply_window_region(int width, int height);
+static void set_window_alpha(BYTE alpha);
 
 static uint64_t monotonic_ms(void)
 {
@@ -2128,9 +2133,37 @@ static void hide_widget(void)
         return;
     }
     g_app.auto_hidden = true;
+    KillTimer(g_app.window, TIMER_COLLAPSE);
+    if (g_app.expanded) {
+        set_expanded(false);
+    }
     apply_topmost(false);
     ShowWindow(g_app.window, SW_MINIMIZE);
     post_ui_event(L"Match running; the widget is hidden until the Sleep Room.");
+}
+
+/*
+ * After a minimize the window comes back as the collapsed strip at its
+ * remembered corner, whatever Windows recorded as its normal rectangle.
+ */
+static void normalize_geometry(void)
+{
+    int width = scale_ui(UI_W);
+    int height = scale_ui(UI_H_COMPACT);
+
+    g_app.expanded = false;
+    g_app.expand_shift = 0;
+    SetWindowPos(g_app.window,
+                 NULL,
+                 g_app.origin.x,
+                 g_app.origin.y,
+                 width,
+                 height,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    apply_window_region(width, height);
+    ShowWindow(g_app.event_log, SW_HIDE);
+    set_window_alpha(UI_ALPHA_IDLE);
+    InvalidateRect(g_app.window, NULL, FALSE);
 }
 
 /* Back in the Sleep Room: return without taking focus from the game. */
@@ -2141,6 +2174,7 @@ static void restore_widget(void)
     }
     g_app.auto_hidden = false;
     ShowWindow(g_app.window, SW_SHOWNOACTIVATE);
+    normalize_geometry();
     apply_topmost(true);
     post_ui_event(L"Back in the Sleep Room; the widget is visible again.");
 }
@@ -2476,9 +2510,12 @@ static void save_window_position(void)
     RECT frame;
     wchar_t value[32];
 
-    if (g_app.window == NULL || !GetWindowRect(g_app.window, &frame)) {
+    if (g_app.window == NULL || IsIconic(g_app.window) ||
+        !GetWindowRect(g_app.window, &frame)) {
         return;
     }
+    g_app.origin.x = frame.left;
+    g_app.origin.y = frame.top + g_app.expand_shift;
     (void)StringCchPrintfW(value, ARRAYSIZE(value), L"%ld", (long)frame.left);
     (void)WritePrivateProfileStringW(
         L"Window", L"X", value, g_app.settings_path);
@@ -2497,7 +2534,8 @@ static void set_expanded(bool expanded)
     int height = scale_ui(expanded ? UI_H_EXPANDED : UI_H_COMPACT);
     int top;
 
-    if (g_app.window == NULL || !GetWindowRect(g_app.window, &frame)) {
+    if (g_app.window == NULL || IsIconic(g_app.window) ||
+        !GetWindowRect(g_app.window, &frame)) {
         return;
     }
     top = frame.top;
@@ -3205,9 +3243,12 @@ static LRESULT CALLBACK window_procedure(HWND window,
                          0,
                          0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        } else if (IsWindowVisible(window)) {
+        } else if (IsWindowVisible(window) && g_app.window != NULL) {
             /* Restored on purpose, so it floats again. */
             g_app.auto_hidden = false;
+            if (wparam == SIZE_RESTORED && (int)LOWORD(lparam) != scale_ui(UI_W)) {
+                normalize_geometry();
+            }
             apply_topmost(true);
         }
         return 0;
@@ -3584,6 +3625,7 @@ int WINAPI wWinMain(HINSTANCE instance,
         if (!load_window_position(&origin)) {
             default_window_position(&origin);
         }
+        g_app.origin = origin;
         g_app.pinned = GetPrivateProfileIntW(
                            L"Window", L"Pinned", 0, g_app.settings_path) != 0;
         g_app.expanded = false;
