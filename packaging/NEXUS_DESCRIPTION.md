@@ -47,9 +47,11 @@ log records and the Trial Board layout only.
 3. Start Outlast Requeue and enable auto-requeue.
 4. Select Imposter and start the first search yourself.
 
-Search time is cumulative across the entire verified requeue chain. The app
-stops when an Invasion match succeeds. Closing the window (the title-bar X)
-exits the application completely.
+The app is a small floating widget: state, search timer, and requeue count in
+a strip, the full panel when the pointer rests on it. Search time is
+cumulative across the entire verified requeue chain. When an Invasion match is
+found the widget counts down ten seconds, then minimizes and stops floating.
+The X icon exits the application completely.
 
 ## Important notice
 

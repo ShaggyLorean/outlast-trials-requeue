@@ -29,6 +29,7 @@
 #define GAME_EXE L"TOTClient-Win64-Shipping.exe"
 
 #define TIMER_UI 1
+#define TIMER_COLLAPSE 2
 #define WM_STATE_CHANGED (WM_APP + 2)
 #define WM_UI_EVENT (WM_APP + 3)
 #define WM_SHOW_EXISTING (WM_APP + 4)
@@ -36,6 +37,8 @@
 #define ID_TOGGLE 1001
 #define ID_LOCATE 1002
 #define ID_OPEN_LOG 1004
+#define ID_PIN 1005
+#define ID_CLOSE 1006
 
 #define PATH_CAP 32768
 #define STATUS_CAP 256
@@ -64,6 +67,7 @@
  * costs nothing, so the sequence keeps knocking for two minutes rather than
  * giving up and leaving the player out of the queue.
  */
+#define SEARCH_RECOVERY_MAX_MS UINT64_C(6 * 60 * 60 * 1000)
 #define ACTION_MAX_TAB_TRIES 40u
 #define ACTION_NOTE_EVERY_TRIES 5u
 
@@ -116,9 +120,15 @@
 #define CLR_ACCENT_HOT RGB(240, 70, 92)
 #define CLR_ACCENT_PRESS RGB(170, 32, 50)
 
-#define UI_CLIENT_W 520
-#define UI_CLIENT_H 700
-#define UI_MARGIN 28
+#define UI_W 320
+#define UI_H_COMPACT 64
+#define UI_H_EXPANDED 392
+#define UI_PAD 14
+#define UI_GLYPH_BUTTON 20
+#define UI_ALPHA_IDLE 215
+#define HOVER_COLLAPSE_MS 450
+#define UI_CORNER_RADIUS 10
+#define HIDE_COUNTDOWN_SECONDS 10
 
 enum ui_font {
     F_TITLE,
@@ -132,6 +142,7 @@ enum ui_font {
     F_BTN,
     F_LOG,
     F_SMALL,
+    F_GLYPH,
     F_COUNT
 };
 
@@ -173,8 +184,20 @@ typedef struct app_state {
     HWND toggle_button;
     HWND locate_button;
     HWND log_button;
+    HWND pin_button;
+    HWND close_button;
     HWND event_log;
     HWND hot_button;
+    bool expanded;
+    bool pinned;
+    bool hover_tracked;
+    int expand_shift;
+    /*
+     * A found match ends the session: the widget counts down, then minimizes
+     * and stops floating above other windows.  It floats only while armed.
+     */
+    bool hide_request;
+    int hide_countdown;
     HICON icon;
     HFONT fonts[F_COUNT];
     HBRUSH background_brush;
@@ -200,6 +223,15 @@ typedef struct app_state {
     uint64_t action_gate_ms;
     uint64_t display_total_ms;
     uint32_t display_requeue_count;
+    /*
+     * The search timer runs on the monotonic clock from the moment the
+     * searching record is seen.  The record carries the matchmaking service
+     * clock, and measuring against the local wall clock froze the timer at
+     * zero for as long as the two disagreed.
+     */
+    bool search_live;
+    uint64_t search_base_ms;
+    uint64_t search_anchor_mono_ms;
     int ui_state;
     start_button start;
 
@@ -222,6 +254,8 @@ typedef struct app_state {
 } app_state;
 
 static app_state g_app;
+
+static void apply_topmost(bool topmost);
 
 static uint64_t monotonic_ms(void)
 {
@@ -1540,31 +1574,52 @@ static void apply_engine_event_locked(const rq_event *event)
         g_app.display_requeue_count = event->requeue_count;
     }
     switch (event->type) {
-    case RQ_EVENT_SEARCHING:
+    case RQ_EVENT_SEARCHING: {
+        uint64_t now_mono = monotonic_ms();
+        uint64_t already_ms = 0;
+
         if (!event->requeue_confirmed && !event->recovered) {
             g_app.display_total_ms = 0;
         }
+        if (event->recovered && event->has_started_at) {
+            uint64_t now_wall = wall_clock_ms();
+            if (now_wall > event->started_at_ms) {
+                already_ms = now_wall - event->started_at_ms;
+            }
+            if (already_ms > SEARCH_RECOVERY_MAX_MS) {
+                already_ms = SEARCH_RECOVERY_MAX_MS;
+            }
+        }
+        g_app.search_live = true;
+        g_app.search_base_ms = event->cumulative_before_ms;
+        g_app.search_anchor_mono_ms = now_mono - already_ms;
         g_app.ui_state = UI_STATE_SEARCHING;
         set_status_locked(L"Searching for an Invasion match");
         break;
+    }
     case RQ_EVENT_TIMEOUT:
+        g_app.search_live = false;
         g_app.display_total_ms = event->total_search_ms;
         g_app.ui_state = UI_STATE_REQUEUE;
         set_status_locked(L"Timeout detected, letting the client settle");
         break;
     case RQ_EVENT_SUCCEEDED:
+        g_app.search_live = false;
         g_app.display_total_ms = event->total_search_ms;
         g_app.enabled = false;
         ++g_app.generation;
+        g_app.hide_request = true;
         g_app.ui_state = UI_STATE_DONE;
         set_status_locked(L"Match found, automation stopped");
         break;
     case RQ_EVENT_CANCELED:
+        g_app.search_live = false;
         g_app.display_total_ms = event->total_search_ms;
         g_app.ui_state = UI_STATE_ARMED;
         set_status_locked(L"Search canceled, waiting for a manual search");
         break;
     case RQ_EVENT_DISCONNECTED:
+        g_app.search_live = false;
         g_app.display_total_ms = event->total_search_ms;
         g_app.ui_state = UI_STATE_ARMED;
         set_status_locked(L"Server disconnected, waiting for a manual search");
@@ -1758,6 +1813,7 @@ static bool recover_log(HANDLE file,
     rq_engine_init(&g_app.engine);
     g_app.display_total_ms = 0;
     g_app.display_requeue_count = 0;
+    g_app.search_live = false;
     LeaveCriticalSection(&g_app.lock);
     while (remaining > 0) {
         DWORD requested = remaining > sizeof(bytes) ? sizeof(bytes) : (DWORD)remaining;
@@ -2019,13 +2075,13 @@ static void format_elapsed(uint64_t milliseconds,
 
 static uint64_t current_elapsed_locked(void)
 {
-    uint64_t total;
     if (g_app.engine.has_armed_ticket) {
-        total = g_app.engine.cumulative_search_ms;
-        if (g_app.engine.has_search_started) {
-            uint64_t now = wall_clock_ms();
-            if (now >= g_app.engine.search_started_ms) {
-                total += now - g_app.engine.search_started_ms;
+        uint64_t total = g_app.engine.cumulative_search_ms;
+        if (g_app.search_live) {
+            uint64_t now = monotonic_ms();
+            total = g_app.search_base_ms;
+            if (now >= g_app.search_anchor_mono_ms) {
+                total += now - g_app.search_anchor_mono_ms;
             }
         }
         return total;
@@ -2056,7 +2112,18 @@ static void refresh_ui(void)
     start = g_app.start;
     g_app.display_state = g_app.ui_state;
     (void)StringCchCopyW(g_app.disp_status, STATUS_CAP, g_app.status);
+    if (g_app.hide_request) {
+        g_app.hide_request = false;
+        g_app.hide_countdown = HIDE_COUNTDOWN_SECONDS;
+    }
     LeaveCriticalSection(&g_app.lock);
+    if (g_app.hide_countdown > 0) {
+        (void)StringCchPrintfW(g_app.disp_status,
+                               STATUS_CAP,
+                               L"Match found, hiding in %d second%ls",
+                               g_app.hide_countdown,
+                               g_app.hide_countdown == 1 ? L"" : L"s");
+    }
 
     g_app.display_enabled = enabled;
     format_elapsed(elapsed_ms, g_app.disp_timer, ARRAYSIZE(g_app.disp_timer));
@@ -2079,15 +2146,13 @@ static void refresh_ui(void)
     }
     if (start.source == START_SOURCE_NONE) {
         (void)StringCchCopyW(
-            g_app.disp_start, ARRAYSIZE(g_app.disp_start), L"not located yet");
+            g_app.disp_start, ARRAYSIZE(g_app.disp_start), L"none yet");
     } else {
         (void)StringCchPrintfW(g_app.disp_start,
                                ARRAYSIZE(g_app.disp_start),
-                               L"%d, %d in %dx%d",
+                               L"%d, %d",
                                start.x,
-                               start.y,
-                               start.client_width,
-                               start.client_height);
+                               start.y);
     }
     SetWindowTextW(g_app.toggle_button,
                    enabled ? L"DISABLE AUTO-REQUEUE" : L"ENABLE AUTO-REQUEUE");
@@ -2154,10 +2219,16 @@ static void set_enabled(bool enabled)
     rq_engine_init(&g_app.engine);
     g_app.display_total_ms = 0;
     g_app.display_requeue_count = 0;
+    g_app.search_live = false;
+    g_app.hide_request = false;
     g_app.ui_state = enabled ? UI_STATE_ARMED : UI_STATE_OFF;
     set_status_locked(enabled ? L"Armed, start the first Imposter search yourself"
                               : L"Automation is off");
     LeaveCriticalSection(&g_app.lock);
+    g_app.hide_countdown = 0;
+    if (enabled) {
+        apply_topmost(true);
+    }
     SetEvent(g_app.wake_event);
     if (enabled) {
         post_ui_event(L"Auto-requeue enabled.");
@@ -2218,30 +2289,6 @@ static void open_log_folder(void)
     } else {
         set_status(L"The game log folder does not exist yet.");
     }
-}
-
-static void apply_dark_titlebar(HWND window)
-{
-    BOOL dark = TRUE;
-    COLORREF chrome = CLR_BG;
-    DWORD square = 1;
-    const DWORD immersive_dark_mode = 20;
-    const DWORD immersive_dark_mode_legacy = 19;
-    const DWORD caption_color = 35;
-    const DWORD border_color = 34;
-    const DWORD corner_preference = 33;
-
-    if (FAILED(DwmSetWindowAttribute(
-            window, immersive_dark_mode, &dark, sizeof(dark)))) {
-        (void)DwmSetWindowAttribute(
-            window, immersive_dark_mode_legacy, &dark, sizeof(dark));
-    }
-    (void)DwmSetWindowAttribute(
-        window, caption_color, &chrome, sizeof(chrome));
-    (void)DwmSetWindowAttribute(
-        window, border_color, &chrome, sizeof(chrome));
-    (void)DwmSetWindowAttribute(
-        window, corner_preference, &square, sizeof(square));
 }
 
 static UINT system_dpi(void)
@@ -2314,43 +2361,184 @@ static HFONT create_font_preferring(int points,
     return font != NULL ? font : create_font(points, weight, fallback);
 }
 
-static LRESULT CALLBACK button_subclass(HWND button,
-                                        UINT message,
-                                        WPARAM wparam,
-                                        LPARAM lparam,
-                                        UINT_PTR subclass_id,
-                                        DWORD_PTR reference)
+/*
+ * The window is a small always-on-top widget.  Collapsed, it shows the state
+ * and the timer in one strip; while the pointer rests on it, it grows into
+ * the full panel.  Leaving the widget collapses it again unless it is pinned.
+ * Every child window reports pointer entry and exit here, so the panel stays
+ * open while the pointer moves between the strip and its controls.
+ */
+/*
+ * The widget floats above other windows until a match is found; then it
+ * minimizes and stops floating, and floats again once restored or re-armed.
+ */
+static void apply_topmost(bool topmost)
 {
-    (void)reference;
+    if (g_app.window == NULL || IsIconic(g_app.window)) {
+        return;
+    }
+    SetWindowPos(g_app.window,
+                 topmost ? HWND_TOPMOST : HWND_NOTOPMOST,
+                 0,
+                 0,
+                 0,
+                 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+/*
+ * Corners are rounded with a window region rather than the DWM corner
+ * preference: with a layered window, DWM kept showing the image of the
+ * previous size after every resize, which looked like a second widget.
+ */
+static void apply_window_region(int width, int height)
+{
+    int radius = scale_ui(UI_CORNER_RADIUS);
+    HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius, radius);
+    if (region != NULL && SetWindowRgn(g_app.window, region, TRUE) == 0) {
+        DeleteObject(region);
+    }
+}
+
+static void set_window_alpha(BYTE alpha)
+{
+    (void)SetLayeredWindowAttributes(g_app.window, 0, alpha, LWA_ALPHA);
+}
+
+static void save_window_position(void)
+{
+    RECT frame;
+    wchar_t value[32];
+
+    if (g_app.window == NULL || !GetWindowRect(g_app.window, &frame)) {
+        return;
+    }
+    (void)StringCchPrintfW(value, ARRAYSIZE(value), L"%ld", (long)frame.left);
+    (void)WritePrivateProfileStringW(
+        L"Window", L"X", value, g_app.settings_path);
+    (void)StringCchPrintfW(value,
+                           ARRAYSIZE(value),
+                           L"%ld",
+                           (long)(frame.top + g_app.expand_shift));
+    (void)WritePrivateProfileStringW(
+        L"Window", L"Y", value, g_app.settings_path);
+}
+
+static void set_expanded(bool expanded)
+{
+    RECT frame;
+    RECT work;
+    int height = scale_ui(expanded ? UI_H_EXPANDED : UI_H_COMPACT);
+    int top;
+
+    if (g_app.window == NULL || !GetWindowRect(g_app.window, &frame)) {
+        return;
+    }
+    top = frame.top;
+    if (expanded && !g_app.expanded) {
+        HMONITOR monitor = MonitorFromWindow(g_app.window,
+                                             MONITOR_DEFAULTTONEAREST);
+        MONITORINFO info;
+        int overflow;
+
+        info.cbSize = sizeof(info);
+        work = frame;
+        if (GetMonitorInfoW(monitor, &info)) {
+            work = info.rcWork;
+        }
+        overflow = (frame.top + height) - work.bottom;
+        if (overflow > 0) {
+            g_app.expand_shift = overflow;
+            if (frame.top - overflow < work.top) {
+                g_app.expand_shift = frame.top - work.top;
+            }
+            top = frame.top - g_app.expand_shift;
+        } else {
+            g_app.expand_shift = 0;
+        }
+    } else if (!expanded && g_app.expanded) {
+        top = frame.top + g_app.expand_shift;
+        g_app.expand_shift = 0;
+    }
+    g_app.expanded = expanded;
+    SetWindowPos(g_app.window,
+                 NULL,
+                 frame.left,
+                 top,
+                 frame.right - frame.left,
+                 height,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+    apply_window_region(frame.right - frame.left, height);
+    ShowWindow(g_app.event_log, expanded ? SW_SHOWNA : SW_HIDE);
+    set_window_alpha(expanded ? 255 : UI_ALPHA_IDLE);
+    InvalidateRect(g_app.window, NULL, FALSE);
+}
+
+static void hover_enter(void)
+{
+    KillTimer(g_app.window, TIMER_COLLAPSE);
+    if (!g_app.expanded) {
+        set_expanded(true);
+    }
+}
+
+static void hover_leave(void)
+{
+    if (!g_app.pinned) {
+        SetTimer(g_app.window, TIMER_COLLAPSE, HOVER_COLLAPSE_MS, NULL);
+    }
+}
+
+static void track_leave(HWND window, bool nonclient)
+{
+    TRACKMOUSEEVENT track;
+    track.cbSize = sizeof(track);
+    track.dwFlags = TME_LEAVE | (nonclient ? TME_NONCLIENT : 0);
+    track.hwndTrack = window;
+    track.dwHoverTime = 0;
+    (void)TrackMouseEvent(&track);
+}
+
+static LRESULT CALLBACK child_subclass(HWND child,
+                                       UINT message,
+                                       WPARAM wparam,
+                                       LPARAM lparam,
+                                       UINT_PTR subclass_id,
+                                       DWORD_PTR reference)
+{
+    bool is_button = reference != 0;
+
     switch (message) {
     case WM_MOUSEMOVE:
-        if (g_app.hot_button != button) {
-            TRACKMOUSEEVENT track;
-            g_app.hot_button = button;
-            InvalidateRect(button, NULL, FALSE);
-            track.cbSize = sizeof(track);
-            track.dwFlags = TME_LEAVE;
-            track.hwndTrack = button;
-            track.dwHoverTime = 0;
-            (void)TrackMouseEvent(&track);
+        hover_enter();
+        if (g_app.hot_button != child) {
+            if (is_button) {
+                g_app.hot_button = child;
+                InvalidateRect(child, NULL, FALSE);
+            }
+            track_leave(child, false);
         }
         break;
     case WM_MOUSELEAVE:
-        if (g_app.hot_button == button) {
+        hover_leave();
+        if (g_app.hot_button == child) {
             g_app.hot_button = NULL;
-            InvalidateRect(button, NULL, FALSE);
+            InvalidateRect(child, NULL, FALSE);
         }
         break;
     case WM_SETCURSOR:
-        SetCursor(LoadCursorW(NULL, IDC_HAND));
-        return TRUE;
+        if (is_button) {
+            SetCursor(LoadCursorW(NULL, IDC_HAND));
+            return TRUE;
+        }
+        break;
     case WM_NCDESTROY:
-        (void)RemoveWindowSubclass(button, button_subclass, subclass_id);
+        (void)RemoveWindowSubclass(child, child_subclass, subclass_id);
         break;
     default:
         break;
     }
-    return DefSubclassProc(button, message, wparam, lparam);
+    return DefSubclassProc(child, message, wparam, lparam);
 }
 
 static HWND create_button(HWND parent,
@@ -2373,13 +2561,13 @@ static HWND create_button(HWND parent,
                                   (HMENU)(INT_PTR)identifier,
                                   g_app.instance,
                                   NULL);
-    (void)SetWindowSubclass(button, button_subclass, 1, 0);
+    (void)SetWindowSubclass(button, child_subclass, 1, 1);
     return button;
 }
 
 static void show_main_window(void)
 {
-    ShowWindow(g_app.window, SW_RESTORE);
+    ShowWindow(g_app.window, SW_SHOWNA);
     SetWindowPos(g_app.window,
                  HWND_TOPMOST,
                  0,
@@ -2387,6 +2575,7 @@ static void show_main_window(void)
                  0,
                  0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    hover_enter();
 }
 
 static void fill_rect_color(HDC dc, const RECT *rectangle, COLORREF color)
@@ -2406,9 +2595,9 @@ static void frame_rect_color(HDC dc, const RECT *rectangle, COLORREF color)
 static void draw_rule(HDC dc, int y)
 {
     RECT rule;
-    rule.left = scale_ui(UI_MARGIN);
+    rule.left = scale_ui(UI_PAD);
     rule.top = scale_ui(y);
-    rule.right = scale_ui(UI_CLIENT_W - UI_MARGIN);
+    rule.right = scale_ui(UI_W - UI_PAD);
     rule.bottom = rule.top + 1;
     fill_rect_color(dc, &rule, CLR_LINE);
 }
@@ -2452,6 +2641,7 @@ static void draw_button(const DRAWITEMSTRUCT *draw)
     wchar_t text[128];
     RECT rectangle = draw->rcItem;
     bool primary = draw->CtlID == ID_TOGGLE;
+    bool glyph = draw->CtlID == ID_PIN || draw->CtlID == ID_CLOSE;
     bool pressed = (draw->itemState & ODS_SELECTED) != 0;
     bool hot = draw->hwndItem == g_app.hot_button;
     HFONT font = primary ? g_app.fonts[F_BTN_MAIN] : g_app.fonts[F_BTN];
@@ -2462,7 +2652,15 @@ static void draw_button(const DRAWITEMSTRUCT *draw)
     int x;
     int y;
 
-    if (primary && !g_app.display_enabled) {
+    if (glyph) {
+        bool active = draw->CtlID == ID_PIN && g_app.pinned;
+        fill = pressed ? CLR_PANEL_PRESS : hot ? CLR_PANEL_HOT : CLR_BG;
+        edge = fill;
+        ink = active ? CLR_ACCENT : hot ? CLR_TEXT : CLR_TEXT_FAINT;
+        if (g_app.fonts[F_GLYPH] != NULL) {
+            font = g_app.fonts[F_GLYPH];
+        }
+    } else if (primary && !g_app.display_enabled) {
         fill = pressed ? CLR_ACCENT_PRESS : hot ? CLR_ACCENT_HOT : CLR_ACCENT;
         edge = fill;
         ink = RGB(255, 246, 248);
@@ -2479,13 +2677,24 @@ static void draw_button(const DRAWITEMSTRUCT *draw)
     frame_rect_color(draw->hDC, &rectangle, edge);
 
     text[0] = L'\0';
-    GetWindowTextW(draw->hwndItem, text, ARRAYSIZE(text));
+    if (glyph) {
+        if (g_app.fonts[F_GLYPH] != NULL) {
+            text[0] = draw->CtlID == ID_CLOSE
+                          ? (wchar_t)0xE8BB
+                          : (wchar_t)(g_app.pinned ? 0xE77A : 0xE718);
+        } else {
+            text[0] = draw->CtlID == ID_CLOSE ? L'x' : L'p';
+        }
+        text[1] = L'\0';
+    } else {
+        GetWindowTextW(draw->hwndItem, text, ARRAYSIZE(text));
+    }
     SetBkMode(draw->hDC, TRANSPARENT);
-    width = text_span(draw->hDC, font, text, 1);
+    width = text_span(draw->hDC, font, text, glyph ? 0 : 1);
     x = rectangle.left + (rectangle.right - rectangle.left - width) / 2;
     y = rectangle.top +
         (rectangle.bottom - rectangle.top - font_height(draw->hDC, font)) / 2;
-    draw_span(draw->hDC, font, ink, 1, x, y, text);
+    draw_span(draw->hDC, font, ink, glyph ? 0 : 1, x, y, text);
 }
 
 static const wchar_t *state_label(int state)
@@ -2517,7 +2726,7 @@ static void draw_stat(HDC dc,
               value_color,
               0,
               x,
-              y + scale_ui(16),
+              y + scale_ui(13),
               value);
 }
 
@@ -2525,34 +2734,20 @@ static void paint_window(HDC dc, const RECT *client)
 {
     RECT rect;
     wchar_t footer[160];
+    wchar_t requeues[48];
     const wchar_t *game_value;
     COLORREF game_color;
     COLORREF state_color;
-    int left = scale_ui(UI_MARGIN);
-    int right = scale_ui(UI_CLIENT_W - UI_MARGIN);
-    int column = (UI_CLIENT_W - 2 * UI_MARGIN) / 3;
+    int left = scale_ui(UI_PAD);
+    int right = scale_ui(UI_W - UI_PAD);
+    int glyph_area = scale_ui(UI_GLYPH_BUTTON * 2 + 6);
+    int column = (UI_W - 2 * UI_PAD) / 3;
     int width;
 
     FillRect(dc, client, g_app.background_brush);
     SetBkMode(dc, TRANSPARENT);
 
-    draw_span(dc,
-              g_app.fonts[F_TITLE],
-              CLR_TEXT,
-              2,
-              left,
-              scale_ui(22),
-              L"OUTLAST REQUEUE");
-    width = text_span(dc, g_app.fonts[F_SMALL], APP_VERSION, 0);
-    draw_span(dc,
-              g_app.fonts[F_SMALL],
-              CLR_TEXT_FAINT,
-              0,
-              right - width,
-              scale_ui(26),
-              APP_VERSION);
-    draw_rule(dc, 56);
-
+    /* Collapsed strip: state, timer, requeue count, game presence. */
     state_color = g_app.display_state == UI_STATE_OFF ? CLR_TEXT_FAINT
                                                       : CLR_ACCENT;
     if (g_app.display_state == UI_STATE_REQUEUE && (g_app.pulse & 1) != 0) {
@@ -2563,12 +2758,32 @@ static void paint_window(HDC dc, const RECT *client)
               state_color,
               3,
               left,
-              scale_ui(76),
+              scale_ui(11),
               state_label(g_app.display_state));
+    if (g_app.hide_countdown > 0) {
+        (void)StringCchPrintfW(requeues,
+                               ARRAYSIZE(requeues),
+                               L"HIDING IN %d S",
+                               g_app.hide_countdown);
+    } else {
+        (void)StringCchPrintfW(requeues,
+                               ARRAYSIZE(requeues),
+                               L"%ls REQUEUE%ls",
+                               g_app.disp_count,
+                               wcscmp(g_app.disp_count, L"1") == 0 ? L"" : L"S");
+    }
+    width = text_span(dc, g_app.fonts[F_LABEL], requeues, 2);
+    draw_span(dc,
+              g_app.fonts[F_LABEL],
+              CLR_TEXT_FAINT,
+              2,
+              right - glyph_area - width,
+              scale_ui(12),
+              requeues);
     rect.left = left;
-    rect.top = scale_ui(96);
+    rect.top = scale_ui(26);
     rect.right = right;
-    rect.bottom = scale_ui(172);
+    rect.bottom = scale_ui(58);
     SelectObject(dc, g_app.fonts[F_TIMER]);
     SetTextColor(dc, g_app.display_enabled ? CLR_TEXT : RGB(110, 112, 122));
     (void)DrawTextW(dc,
@@ -2576,55 +2791,77 @@ static void paint_window(HDC dc, const RECT *client)
                     -1,
                     &rect,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    if (!g_app.game_running) {
+        game_value = L"game not running";
+        game_color = CLR_TEXT_FAINT;
+    } else if (!g_app.game_window_found) {
+        game_value = L"game window missing";
+        game_color = CLR_ACCENT;
+    } else {
+        game_value = L"game window found";
+        game_color = CLR_TEXT_DIM;
+    }
+    width = text_span(dc, g_app.fonts[F_SMALL], game_value, 0);
+    draw_span(dc,
+              g_app.fonts[F_SMALL],
+              game_color,
+              0,
+              right - width,
+              scale_ui(38),
+              game_value);
+    rect.left = right - width - scale_ui(12);
+    rect.top = scale_ui(42);
+    rect.right = rect.left + scale_ui(6);
+    rect.bottom = rect.top + scale_ui(6);
+    fill_rect_color(dc,
+                    &rect,
+                    g_app.game_window_found ? CLR_ACCENT : CLR_LINE);
+
+    rect = *client;
+    frame_rect_color(dc, &rect, CLR_LINE);
+    if (!g_app.expanded) {
+        return;
+    }
+
+    draw_rule(dc, UI_H_COMPACT);
     rect.left = left;
-    rect.top = scale_ui(178);
+    rect.top = scale_ui(72);
     rect.right = right;
-    rect.bottom = scale_ui(214);
+    rect.bottom = scale_ui(104);
     SelectObject(dc, g_app.fonts[F_STATUS]);
     SetTextColor(dc, CLR_TEXT_DIM);
     (void)DrawTextW(dc,
                     g_app.disp_status,
                     -1,
                     &rect,
-                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
-    draw_rule(dc, 218);
+                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_END_ELLIPSIS);
 
-    if (!g_app.game_running) {
-        game_value = L"not running";
-        game_color = CLR_TEXT_DIM;
-    } else if (!g_app.game_window_found) {
-        game_value = L"no window";
-        game_color = CLR_ACCENT;
-    } else {
-        game_value = L"window found";
-        game_color = CLR_TEXT;
-    }
-    draw_stat(dc, left, scale_ui(234), L"REQUEUES", g_app.disp_count, CLR_TEXT);
+    draw_stat(dc, left, scale_ui(108), L"REQUEUES", g_app.disp_count, CLR_TEXT);
     draw_stat(dc,
               left + scale_ui(column),
-              scale_ui(234),
+              scale_ui(108),
               L"ATTEMPT",
               g_app.disp_attempt,
               CLR_TEXT);
     draw_stat(dc,
               left + scale_ui(column * 2),
-              scale_ui(234),
-              L"GAME",
-              game_value,
-              game_color);
-    draw_rule(dc, 296);
+              scale_ui(108),
+              L"START",
+              g_app.disp_start,
+              CLR_TEXT);
+    draw_rule(dc, 148);
 
     draw_span(dc,
               g_app.fonts[F_LABEL],
               CLR_TEXT_FAINT,
               2,
               left,
-              scale_ui(432),
+              scale_ui(240),
               L"GAME FOLDER");
     rect.left = left;
-    rect.top = scale_ui(448);
+    rect.top = scale_ui(253);
     rect.right = right;
-    rect.bottom = scale_ui(466);
+    rect.bottom = scale_ui(268);
     SelectObject(dc, g_app.fonts[F_PATH]);
     SetTextColor(dc,
                  g_app.game_dir[0] != L'\0' ? RGB(196, 198, 206)
@@ -2642,33 +2879,19 @@ static void paint_window(HDC dc, const RECT *client)
               CLR_TEXT_FAINT,
               2,
               left,
-              scale_ui(480),
-              L"START BUTTON");
-    draw_span(dc,
-              g_app.fonts[F_PATH],
-              RGB(196, 198, 206),
-              0,
-              left,
-              scale_ui(496),
-              g_app.disp_start);
-
-    draw_span(dc,
-              g_app.fonts[F_LABEL],
-              CLR_TEXT_FAINT,
-              2,
-              left,
-              scale_ui(524),
+              scale_ui(276),
               L"ACTIVITY");
     rect.left = left;
-    rect.top = scale_ui(542);
+    rect.top = scale_ui(290);
     rect.right = right;
-    rect.bottom = scale_ui(668);
+    rect.bottom = scale_ui(366);
     fill_rect_color(dc, &rect, CLR_PANEL);
     frame_rect_color(dc, &rect, CLR_LINE);
 
     (void)StringCchPrintfW(footer,
                            ARRAYSIZE(footer),
-                           L"by %ls, verified on game build %ls",
+                           L"%ls  by %ls  build %ls",
+                           APP_VERSION,
                            APP_AUTHOR,
                            SUPPORTED_BUILD_ID);
     draw_span(dc,
@@ -2676,7 +2899,7 @@ static void paint_window(HDC dc, const RECT *client)
               CLR_TEXT_FAINT,
               0,
               left,
-              scale_ui(678),
+              scale_ui(372),
               footer);
 }
 
@@ -2686,49 +2909,99 @@ static LRESULT CALLBACK window_procedure(HWND window,
                                          LPARAM lparam)
 {
     switch (message) {
-    case WM_CREATE:
-        apply_dark_titlebar(window);
+    case WM_CREATE: {
+        DWORD square = 1;
+        COLORREF none = 0xFFFFFFFE;
+        const DWORD corner_preference = 33;
+        const DWORD border_color = 34;
+        int half = (UI_W - 2 * UI_PAD - 8) / 2;
+
+        (void)DwmSetWindowAttribute(
+            window, corner_preference, &square, sizeof(square));
+        (void)DwmSetWindowAttribute(
+            window, border_color, &none, sizeof(none));
+        g_app.pin_button = create_button(window,
+                                         L"",
+                                         ID_PIN,
+                                         UI_W - UI_PAD - UI_GLYPH_BUTTON * 2 - 4,
+                                         10,
+                                         UI_GLYPH_BUTTON,
+                                         UI_GLYPH_BUTTON);
+        g_app.close_button = create_button(window,
+                                           L"",
+                                           ID_CLOSE,
+                                           UI_W - UI_PAD - UI_GLYPH_BUTTON,
+                                           10,
+                                           UI_GLYPH_BUTTON,
+                                           UI_GLYPH_BUTTON);
         g_app.toggle_button = create_button(window,
                                             L"ENABLE AUTO-REQUEUE",
                                             ID_TOGGLE,
-                                            UI_MARGIN,
-                                            314,
-                                            UI_CLIENT_W - 2 * UI_MARGIN,
-                                            48);
+                                            UI_PAD,
+                                            158,
+                                            UI_W - 2 * UI_PAD,
+                                            36);
         g_app.locate_button = create_button(
-            window, L"GAME FOLDER", ID_LOCATE, UI_MARGIN, 372, 228, 40);
+            window, L"GAME FOLDER", ID_LOCATE, UI_PAD, 202, half, 30);
         g_app.log_button = create_button(window,
-                                         L"OPEN LOG FOLDER",
+                                         L"LOG FOLDER",
                                          ID_OPEN_LOG,
-                                         UI_CLIENT_W - UI_MARGIN - 228,
-                                         372,
-                                         228,
-                                         40);
+                                         UI_W - UI_PAD - half,
+                                         202,
+                                         half,
+                                         30);
         g_app.event_log = CreateWindowExW(0,
                                           L"EDIT",
                                           L"",
                                           WS_CHILD | WS_VISIBLE |
                                               ES_MULTILINE | ES_AUTOVSCROLL |
                                               ES_READONLY,
-                                          scale_ui(UI_MARGIN + 8),
-                                          scale_ui(550),
-                                          scale_ui(UI_CLIENT_W -
-                                                   2 * UI_MARGIN - 16),
-                                          scale_ui(110),
+                                          scale_ui(UI_PAD + 6),
+                                          scale_ui(296),
+                                          scale_ui(UI_W - 2 * UI_PAD - 12),
+                                          scale_ui(64),
                                           window,
                                           NULL,
                                           g_app.instance,
                                           NULL);
+        (void)SetWindowSubclass(g_app.event_log, child_subclass, 2, 0);
         SendMessageW(
             g_app.event_log, WM_SETFONT, (WPARAM)g_app.fonts[F_LOG], TRUE);
         SendMessageW(g_app.event_log,
                      EM_SETMARGINS,
                      EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                     MAKELPARAM(scale_ui(4), scale_ui(4)));
+                     MAKELPARAM(scale_ui(3), scale_ui(3)));
         SetTimer(window, TIMER_UI, 1000, NULL);
         append_event_log(L"Ready. Start the first Imposter search yourself.");
         refresh_game_presence();
         refresh_ui();
+        return 0;
+    }
+
+    case WM_NCHITTEST: {
+        LRESULT hit = DefWindowProcW(window, message, wparam, lparam);
+        /* The whole strip drags the widget; children keep their own hits. */
+        return hit == HTCLIENT ? HTCAPTION : hit;
+    }
+
+    case WM_NCLBUTTONDBLCLK:
+        return 0;
+
+    case WM_NCMOUSEMOVE:
+        hover_enter();
+        if (!g_app.hover_tracked) {
+            g_app.hover_tracked = true;
+            track_leave(window, true);
+        }
+        break;
+
+    case WM_NCMOUSELEAVE:
+        g_app.hover_tracked = false;
+        hover_leave();
+        break;
+
+    case WM_EXITSIZEMOVE:
+        save_window_position();
         return 0;
 
     case WM_COMMAND:
@@ -2746,6 +3019,20 @@ static LRESULT CALLBACK window_procedure(HWND window,
             return 0;
         case ID_OPEN_LOG:
             open_log_folder();
+            return 0;
+        case ID_PIN:
+            g_app.pinned = !g_app.pinned;
+            (void)WritePrivateProfileStringW(L"Window",
+                                             L"Pinned",
+                                             g_app.pinned ? L"1" : L"0",
+                                             g_app.settings_path);
+            if (g_app.pinned) {
+                hover_enter();
+            }
+            InvalidateRect(g_app.pin_button, NULL, FALSE);
+            return 0;
+        case ID_CLOSE:
+            DestroyWindow(window);
             return 0;
         default:
             break;
@@ -2814,7 +3101,18 @@ static LRESULT CALLBACK window_procedure(HWND window,
             if ((g_app.pulse & 1) == 0) {
                 refresh_game_presence();
             }
+            if (g_app.hide_countdown > 0 && --g_app.hide_countdown == 0) {
+                apply_topmost(false);
+                ShowWindow(window, SW_MINIMIZE);
+                post_ui_event(L"Hidden after the match; the widget floats "
+                              L"again when auto-requeue is enabled.");
+            }
             refresh_ui();
+        } else if (wparam == TIMER_COLLAPSE) {
+            KillTimer(window, TIMER_COLLAPSE);
+            if (!g_app.pinned) {
+                set_expanded(false);
+            }
         }
         return 0;
 
@@ -2845,13 +3143,8 @@ static LRESULT CALLBACK window_procedure(HWND window,
                          0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         } else if (IsWindowVisible(window)) {
-            SetWindowPos(window,
-                         HWND_TOPMOST,
-                         0,
-                         0,
-                         0,
-                         0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            /* Restored from the taskbar on purpose, so it floats again. */
+            apply_topmost(true);
         }
         return 0;
 
@@ -2862,6 +3155,7 @@ static LRESULT CALLBACK window_procedure(HWND window,
     case WM_DESTROY:
         g_app.quitting = true;
         KillTimer(window, TIMER_UI);
+        KillTimer(window, TIMER_COLLAPSE);
         SetEvent(g_app.stop_event);
         SetEvent(g_app.wake_event);
         PostQuitMessage(0);
@@ -2871,6 +3165,39 @@ static LRESULT CALLBACK window_procedure(HWND window,
         break;
     }
     return DefWindowProcW(window, message, wparam, lparam);
+}
+
+/* Restore the saved widget position when it is still on a monitor. */
+static bool load_window_position(POINT *origin)
+{
+    RECT frame;
+
+    origin->x = (LONG)GetPrivateProfileIntW(
+        L"Window", L"X", LONG_MIN, g_app.settings_path);
+    origin->y = (LONG)GetPrivateProfileIntW(
+        L"Window", L"Y", LONG_MIN, g_app.settings_path);
+    if (origin->x == LONG_MIN || origin->y == LONG_MIN) {
+        return false;
+    }
+    frame.left = origin->x;
+    frame.top = origin->y;
+    frame.right = origin->x + scale_ui(UI_W);
+    frame.bottom = origin->y + scale_ui(UI_H_COMPACT);
+    return MonitorFromRect(&frame, MONITOR_DEFAULTTONULL) != NULL;
+}
+
+static void default_window_position(POINT *origin)
+{
+    RECT work;
+
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+        work.left = 0;
+        work.top = 0;
+        work.right = GetSystemMetrics(SM_CXSCREEN);
+        work.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    origin->x = work.right - scale_ui(UI_W) - scale_ui(16);
+    origin->y = work.bottom - scale_ui(UI_H_COMPACT) - scale_ui(16);
 }
 
 static void cli_print(const wchar_t *format, ...)
@@ -3151,18 +3478,24 @@ int WINAPI wWinMain(HINSTANCE instance,
     g_app.background_brush = CreateSolidBrush(CLR_BG);
     g_app.panel_brush = CreateSolidBrush(CLR_PANEL);
     g_app.ui_dpi = system_dpi();
-    g_app.fonts[F_TITLE] = create_font(12, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_STATE] = create_font(9, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_TITLE] = create_font(10, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_STATE] = create_font(8, FW_SEMIBOLD, L"Segoe UI");
     g_app.fonts[F_TIMER] = create_font_preferring(
-        50, FW_SEMIBOLD, L"Segoe UI Variable Display", L"Segoe UI");
-    g_app.fonts[F_STATUS] = create_font(10, FW_NORMAL, L"Segoe UI");
-    g_app.fonts[F_LABEL] = create_font(8, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_VALUE] = create_font(14, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_PATH] = create_font(9, FW_NORMAL, L"Segoe UI");
-    g_app.fonts[F_BTN_MAIN] = create_font(11, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_BTN] = create_font(9, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_LOG] = create_font(9, FW_NORMAL, L"Consolas");
-    g_app.fonts[F_SMALL] = create_font(8, FW_NORMAL, L"Segoe UI");
+        20, FW_SEMIBOLD, L"Segoe UI Variable Display", L"Segoe UI");
+    g_app.fonts[F_STATUS] = create_font(9, FW_NORMAL, L"Segoe UI");
+    g_app.fonts[F_LABEL] = create_font(7, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_VALUE] = create_font(11, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_PATH] = create_font(8, FW_NORMAL, L"Segoe UI");
+    g_app.fonts[F_BTN_MAIN] = create_font(9, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_BTN] = create_font(8, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_LOG] = create_font(8, FW_NORMAL, L"Consolas");
+    g_app.fonts[F_SMALL] = create_font(7, FW_NORMAL, L"Segoe UI");
+    g_app.fonts[F_GLYPH] =
+        create_font_exact(9, FW_NORMAL, L"Segoe Fluent Icons");
+    if (g_app.fonts[F_GLYPH] == NULL) {
+        g_app.fonts[F_GLYPH] =
+            create_font_exact(9, FW_NORMAL, L"Segoe MDL2 Assets");
+    }
     g_app.icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
 
     ZeroMemory(&window_class, sizeof(window_class));
@@ -3181,21 +3514,24 @@ int WINAPI wWinMain(HINSTANCE instance,
     }
 
     {
-        RECT frame = {0, 0, 0, 0};
-        DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
-                      WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-        frame.right = scale_ui(UI_CLIENT_W);
-        frame.bottom = scale_ui(UI_CLIENT_H);
-        (void)AdjustWindowRectEx(
-            &frame, style, FALSE, WS_EX_APPWINDOW | WS_EX_TOPMOST);
-        g_app.window = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_TOPMOST,
+        POINT origin;
+        DWORD style = WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+
+        if (!load_window_position(&origin)) {
+            default_window_position(&origin);
+        }
+        g_app.pinned = GetPrivateProfileIntW(
+                           L"Window", L"Pinned", 0, g_app.settings_path) != 0;
+        g_app.expanded = false;
+        g_app.window = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_TOPMOST |
+                                           WS_EX_LAYERED,
                                        APP_CLASS,
                                        APP_NAME,
                                        style,
-                                       CW_USEDEFAULT,
-                                       CW_USEDEFAULT,
-                                       frame.right - frame.left,
-                                       frame.bottom - frame.top,
+                                       origin.x,
+                                       origin.y,
+                                       scale_ui(UI_W),
+                                       scale_ui(UI_H_COMPACT),
                                        NULL,
                                        NULL,
                                        instance,
@@ -3204,6 +3540,11 @@ int WINAPI wWinMain(HINSTANCE instance,
     if (g_app.window == NULL) {
         result = 1;
         goto cleanup;
+    }
+    apply_window_region(scale_ui(UI_W), scale_ui(UI_H_COMPACT));
+    set_window_alpha(255);
+    if (!ui_smoke_test) {
+        set_expanded(true);
     }
     if (ui_smoke_test) {
         refresh_ui();
@@ -3217,8 +3558,12 @@ int WINAPI wWinMain(HINSTANCE instance,
         DestroyWindow(g_app.window);
         goto cleanup;
     }
-    ShowWindow(g_app.window, SW_SHOWNORMAL);
+    /* The widget never needs keyboard focus, so it never takes it. */
+    ShowWindow(g_app.window, SW_SHOWNOACTIVATE);
     UpdateWindow(g_app.window);
+    if (!g_app.pinned) {
+        SetTimer(g_app.window, TIMER_COLLAPSE, 4000, NULL);
+    }
     while (GetMessageW(&message, NULL, 0, 0) > 0) {
         TranslateMessage(&message);
         DispatchMessageW(&message);

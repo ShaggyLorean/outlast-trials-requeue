@@ -17,11 +17,24 @@ modify any game file.
 The application finds the game through Steam. If that fails, press GAME FOLDER
 and pick the folder that contains `OPP`.
 
-Closing the window with the title-bar close button (X) exits the application
-completely; there is no tray icon and nothing keeps running in the background.
-While the window is open you may minimize it to the taskbar. Live search time is
-shown in the window and is cumulative across every verified requeue in the
-current chain.
+## The widget
+
+- Collapsed, it is a small strip: state, cumulative search timer, requeue
+  count, and whether the game window is found.
+- Rest the pointer on it to open the full panel with the status, attempt
+  number, detected START position, buttons, game folder, and activity log. It
+  collapses when the pointer leaves. The pin icon keeps it open.
+- Drag it anywhere; the position is remembered. It never takes keyboard focus.
+- It floats above other windows, including the game, while you queue. When a
+  match is found it counts down ten seconds, then minimizes to the taskbar and
+  stops floating. Restore it from the taskbar or enable auto-requeue to bring
+  it back on top.
+- The X icon exits the application completely.
+
+There is no tray icon and nothing keeps running in the background after the
+widget is closed. Live search time is cumulative across every verified requeue
+in the current chain; it pauses while a requeue is in progress and stops only
+when a match is found.
 
 ## Command line
 

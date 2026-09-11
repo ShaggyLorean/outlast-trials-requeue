@@ -22,10 +22,21 @@ All notable changes to Outlast Requeue are documented here.
   possible.
 - The first Trial selection is always manual. The board remembers it, so the
   tool only ever presses START; it never picks a therapy or a role.
-- The interface was rebuilt from scratch: a single dark column with the state,
-  the cumulative search timer, the current status, a requeue counter, the
-  attempt number, whether the game window is found, the detected START
-  position, and the activity log. No pills, glyphs, or rounded cards.
+- The interface is now a small floating widget instead of a window. Collapsed,
+  it is a 320 by 64 strip with the state, the cumulative search timer, the
+  requeue count, and whether the game window is found. Resting the pointer on
+  it opens the full panel: status, attempt number, detected START position,
+  the enable button, folder buttons, the game folder, and the activity log.
+  It collapses again when the pointer leaves, unless pinned. Drag it anywhere;
+  the position is remembered. It never takes keyboard focus.
+- When a match is found the widget counts down ten seconds, then minimizes to
+  the taskbar and stops floating above other windows. Restoring it from the
+  taskbar or enabling auto-requeue makes it float again.
+- The search timer runs on the monotonic clock from the moment the searching
+  record is seen. It used to compare the matchmaking service clock with the
+  local clock, so a machine whose time was a few seconds behind showed 00:00
+  for that long. It pauses while a requeue is in progress and continues from
+  the same value when the new ticket is confirmed; it stops only on a match.
 - `--diagnostics` reports the client size and the detected START position when
   the Trial Board is open, and `--self-test` covers the detector.
 - Last verified game build is `25112110`.

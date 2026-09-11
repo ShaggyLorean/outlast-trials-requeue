@@ -28,8 +28,8 @@ See `compatibility.json` for machine-readable compatibility metadata.
 1. Start The Outlast Trials and enter the Sleep Room.
 2. Start Outlast Requeue and enable auto-requeue.
 3. Open the Terminal, select Imposter, and start the first search yourself.
-4. Leave the application open or minimized. Closing it (the title-bar X) exits
-   the application completely.
+4. Leave the widget where it is. It opens when the pointer rests on it, and
+   after a match it minimizes on its own. The X icon exits the application.
 
 The first search is always manual. The board remembers the selection, so the
 application only ever presses START. It acts only after the game log contains
