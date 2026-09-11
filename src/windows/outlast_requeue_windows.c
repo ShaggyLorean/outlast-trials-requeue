@@ -1,6 +1,5 @@
 #define COBJMACROS
 #include <windows.h>
-#include <bcrypt.h>
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -23,14 +22,11 @@
 #define APP_NAME L"Outlast Requeue"
 #define APP_CLASS L"OutlastRequeue.Native.Window.v1"
 #define APP_MUTEX L"Local\\OutlastRequeue.Native.SingleInstance.v1"
-#define APP_VERSION L"1.0.3"
+#define APP_VERSION L"1.0.4"
 #define APP_AUTHOR L"whispersgone"
 #define STEAM_APP_ID L"1304930"
-#define SUPPORTED_BUILD_ID L"24382135"
+#define SUPPORTED_BUILD_ID L"25112110"
 #define GAME_EXE L"TOTClient-Win64-Shipping.exe"
-#define PAK_NAME L"zzz-OutlastRequeue_P.pak"
-#define EXPECTED_PAK_SHA256 \
-    L"1998125961ea66886ae41d71fe15ec2d555d045b980bc487ac5a6ea2a92d0c54"
 
 #define TIMER_UI 1
 #define WM_STATE_CHANGED (WM_APP + 2)
@@ -39,7 +35,6 @@
 
 #define ID_TOGGLE 1001
 #define ID_LOCATE 1002
-#define ID_INSTALL 1003
 #define ID_OPEN_LOG 1004
 
 #define PATH_CAP 32768
@@ -72,35 +67,87 @@
 #define ACTION_MAX_TAB_TRIES 40u
 #define ACTION_NOTE_EVERY_TRIES 5u
 
-#define CLR_BG RGB(10, 11, 14)
-#define CLR_CARD RGB(22, 24, 30)
-#define CLR_CARD_EDGE RGB(41, 44, 55)
-#define CLR_LOG_BG RGB(15, 16, 20)
-#define CLR_TEXT RGB(240, 241, 245)
-#define CLR_TEXT_DIM RGB(157, 163, 175)
-#define CLR_TEXT_FAINT RGB(99, 105, 117)
-#define CLR_ACCENT RGB(226, 48, 71)
-#define CLR_ACCENT_HOVER RGB(243, 72, 94)
-#define CLR_ACCENT_PRESS RGB(166, 30, 47)
+/*
+ * Posted mouse messages are dropped while the game believes it is in the
+ * background.  Telling it otherwise with the same activation messages Windows
+ * would send makes it process the click, and the reverse messages afterwards
+ * put it back.  The operating system foreground window is never touched.
+ */
+#define CLICK_ACTIVATE_SETTLE_MS 250
+#define CLICK_HOVER_MS 200
+#define CLICK_HOLD_MS 100
+#define CLICK_RELEASE_SETTLE_MS 700
 
-#define UI_CLIENT_W 600
-#define UI_CLIENT_H 726
+/*
+ * The START bar is a wide, light, neutral strip in the lower left of the Trial
+ * Board.  It is located in a background capture of the game client instead of
+ * being assumed at a fixed ratio, because the layout is anchored to the window
+ * edges rather than scaled with it.
+ */
+#define START_REGION_RIGHT_PCT 45
+#define START_REGION_TOP_PCT 70
+#define START_BRIGHT_MIN 180
+#define START_NEUTRAL_MAX 40
+#define START_ROW_MIN_PCT 10
+#define START_COLUMN_MIN_PCT 35
+#define START_HEIGHT_MIN_PERMILLE 15
+#define START_HEIGHT_MAX_PERMILLE 90
+#define START_WIDTH_MIN_PCT 12
+#define START_DENSITY_MIN_PCT 55
+/* Measured on a 2560 by 1440 client; used only when no capture is possible. */
+#define START_FALLBACK_X_NUM 461
+#define START_FALLBACK_X_DEN 2560
+#define START_FALLBACK_Y_NUM 1274
+#define START_FALLBACK_Y_DEN 1440
+
+#ifndef PW_RENDERFULLCONTENT
+#define PW_RENDERFULLCONTENT 0x00000002
+#endif
+
+#define CLR_BG RGB(12, 12, 14)
+#define CLR_PANEL RGB(20, 20, 24)
+#define CLR_PANEL_HOT RGB(30, 30, 36)
+#define CLR_PANEL_PRESS RGB(16, 16, 19)
+#define CLR_LINE RGB(40, 40, 46)
+#define CLR_TEXT RGB(236, 236, 240)
+#define CLR_TEXT_DIM RGB(150, 152, 160)
+#define CLR_TEXT_FAINT RGB(96, 98, 106)
+#define CLR_ACCENT RGB(226, 48, 71)
+#define CLR_ACCENT_HOT RGB(240, 70, 92)
+#define CLR_ACCENT_PRESS RGB(170, 32, 50)
+
+#define UI_CLIENT_W 520
+#define UI_CLIENT_H 700
+#define UI_MARGIN 28
 
 enum ui_font {
     F_TITLE,
-    F_SUB,
-    F_PILL,
+    F_STATE,
     F_TIMER,
     F_STATUS,
-    F_SMALL,
-    F_TINY,
+    F_LABEL,
+    F_VALUE,
     F_PATH,
     F_BTN_MAIN,
     F_BTN,
-    F_CHIP,
     F_LOG,
-    F_GLYPH,
+    F_SMALL,
     F_COUNT
+};
+
+enum ui_state {
+    UI_STATE_OFF = 0,
+    UI_STATE_ARMED,
+    UI_STATE_SEARCHING,
+    UI_STATE_REQUEUE,
+    UI_STATE_DONE
+};
+
+enum start_source {
+    START_SOURCE_NONE = 0,
+    START_SOURCE_DETECTED,
+    START_SOURCE_REMEMBERED,
+    START_SOURCE_ESTIMATED
 };
 
 typedef struct file_identity {
@@ -112,12 +159,19 @@ typedef struct file_identity {
     bool valid;
 } file_identity;
 
+typedef struct start_button {
+    int x;
+    int y;
+    int client_width;
+    int client_height;
+    int source;
+} start_button;
+
 typedef struct app_state {
     HINSTANCE instance;
     HWND window;
     HWND toggle_button;
     HWND locate_button;
-    HWND install_button;
     HWND log_button;
     HWND event_log;
     HWND hot_button;
@@ -146,15 +200,22 @@ typedef struct app_state {
     uint64_t action_gate_ms;
     uint64_t display_total_ms;
     uint32_t display_requeue_count;
+    int ui_state;
+    start_button start;
+
     bool display_enabled;
+    int display_state;
+    bool game_running;
+    bool game_window_found;
     unsigned pulse;
     wchar_t disp_timer[32];
-    wchar_t disp_count[64];
     wchar_t disp_status[STATUS_CAP];
+    wchar_t disp_count[32];
+    wchar_t disp_attempt[32];
+    wchar_t disp_start[64];
     wchar_t status[STATUS_CAP];
     wchar_t game_dir[PATH_CAP];
     wchar_t log_path[PATH_CAP];
-    wchar_t pak_path[PATH_CAP];
     wchar_t manifest_path[PATH_CAP];
     wchar_t settings_path[PATH_CAP];
     wchar_t module_dir[PATH_CAP];
@@ -462,10 +523,6 @@ static void update_derived_paths(void)
 {
     wchar_t steamapps[PATH_CAP];
 
-    (void)join_path(g_app.pak_path,
-                    PATH_CAP,
-                    g_app.game_dir,
-                    L"OPP\\Content\\Paks\\" PAK_NAME);
     (void)StringCchCopyW(steamapps, PATH_CAP, g_app.game_dir);
     if (parent_path(steamapps) && parent_path(steamapps)) {
         (void)join_path(g_app.manifest_path,
@@ -609,9 +666,49 @@ static bool discover_game_dir(void)
         return true;
     }
     g_app.game_dir[0] = L'\0';
-    g_app.pak_path[0] = L'\0';
     g_app.manifest_path[0] = L'\0';
     return false;
+}
+
+static void load_remembered_start(void)
+{
+    start_button remembered;
+
+    ZeroMemory(&remembered, sizeof(remembered));
+    remembered.x = (int)GetPrivateProfileIntW(
+        L"StartButton", L"X", 0, g_app.settings_path);
+    remembered.y = (int)GetPrivateProfileIntW(
+        L"StartButton", L"Y", 0, g_app.settings_path);
+    remembered.client_width = (int)GetPrivateProfileIntW(
+        L"StartButton", L"ClientWidth", 0, g_app.settings_path);
+    remembered.client_height = (int)GetPrivateProfileIntW(
+        L"StartButton", L"ClientHeight", 0, g_app.settings_path);
+    if (remembered.x > 0 && remembered.y > 0 && remembered.client_width > 0 &&
+        remembered.client_height > 0) {
+        remembered.source = START_SOURCE_REMEMBERED;
+        g_app.start = remembered;
+    }
+}
+
+static void save_remembered_start(const start_button *button)
+{
+    wchar_t value[32];
+    const struct {
+        const wchar_t *key;
+        int number;
+    } entries[] = {
+        {L"X", button->x},
+        {L"Y", button->y},
+        {L"ClientWidth", button->client_width},
+        {L"ClientHeight", button->client_height},
+    };
+
+    for (size_t index = 0; index < ARRAYSIZE(entries); ++index) {
+        (void)StringCchPrintfW(
+            value, ARRAYSIZE(value), L"%d", entries[index].number);
+        (void)WritePrivateProfileStringW(
+            L"StartButton", entries[index].key, value, g_app.settings_path);
+    }
 }
 
 static bool initialize_paths(void)
@@ -649,6 +746,7 @@ static bool initialize_paths(void)
     }
     (void)StringCchCopyW(g_app.module_dir, PATH_CAP, module);
     (void)discover_game_dir();
+    load_remembered_start();
     return true;
 }
 
@@ -690,116 +788,11 @@ static bool parse_build_id(wchar_t *output, size_t capacity)
     return utf8_to_wide(value, output, capacity);
 }
 
-static bool sha256_file(const wchar_t *path, wchar_t output[65])
-{
-    BCRYPT_ALG_HANDLE algorithm = NULL;
-    BCRYPT_HASH_HANDLE hash = NULL;
-    HANDLE file = INVALID_HANDLE_VALUE;
-    PUCHAR object = NULL;
-    DWORD object_length = 0;
-    DWORD hash_length = 0;
-    DWORD result_length = 0;
-    BYTE digest[32];
-    BYTE buffer[64 * 1024];
-    DWORD count;
-    NTSTATUS status;
-    bool success = false;
-    static const wchar_t digits[] = L"0123456789abcdef";
-
-    status = BCryptOpenAlgorithmProvider(
-        &algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
-    if (status < 0) {
-        goto cleanup;
-    }
-    status = BCryptGetProperty(algorithm,
-                               BCRYPT_OBJECT_LENGTH,
-                               (PUCHAR)&object_length,
-                               sizeof(object_length),
-                               &result_length,
-                               0);
-    if (status < 0) {
-        goto cleanup;
-    }
-    status = BCryptGetProperty(algorithm,
-                               BCRYPT_HASH_LENGTH,
-                               (PUCHAR)&hash_length,
-                               sizeof(hash_length),
-                               &result_length,
-                               0);
-    if (status < 0 || hash_length != sizeof(digest)) {
-        goto cleanup;
-    }
-    object = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, object_length);
-    if (object == NULL) {
-        goto cleanup;
-    }
-    status = BCryptCreateHash(
-        algorithm, &hash, object, object_length, NULL, 0, 0);
-    if (status < 0) {
-        goto cleanup;
-    }
-    file = CreateFileW(path,
-                       GENERIC_READ,
-                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                       NULL,
-                       OPEN_EXISTING,
-                       FILE_FLAG_SEQUENTIAL_SCAN,
-                       NULL);
-    if (file == INVALID_HANDLE_VALUE) {
-        goto cleanup;
-    }
-    do {
-        if (!ReadFile(file, buffer, sizeof(buffer), &count, NULL)) {
-            goto cleanup;
-        }
-        if (count > 0 && BCryptHashData(hash, buffer, count, 0) < 0) {
-            goto cleanup;
-        }
-    } while (count > 0);
-    if (BCryptFinishHash(hash, digest, sizeof(digest), 0) < 0) {
-        goto cleanup;
-    }
-    for (size_t index = 0; index < sizeof(digest); ++index) {
-        output[index * 2] = digits[digest[index] >> 4];
-        output[index * 2 + 1] = digits[digest[index] & 0x0f];
-    }
-    output[64] = L'\0';
-    success = true;
-
-cleanup:
-    if (file != INVALID_HANDLE_VALUE) {
-        CloseHandle(file);
-    }
-    if (hash != NULL) {
-        BCryptDestroyHash(hash);
-    }
-    if (algorithm != NULL) {
-        BCryptCloseAlgorithmProvider(algorithm, 0);
-    }
-    if (object != NULL) {
-        HeapFree(GetProcessHeap(), 0, object);
-    }
-    return success;
-}
-
 static bool validate_install(wchar_t *reason, size_t capacity)
 {
-    wchar_t digest[65];
-
     if (!game_dir_is_valid(g_app.game_dir)) {
         (void)StringCchCopyW(
             reason, capacity, L"The Outlast Trials folder was not found.");
-        return false;
-    }
-    if (!file_exists(g_app.pak_path)) {
-        (void)StringCchCopyW(
-            reason, capacity, L"The required requeue PAK is not installed.");
-        return false;
-    }
-    if (!sha256_file(g_app.pak_path, digest) ||
-        _wcsicmp(digest, EXPECTED_PAK_SHA256) != 0) {
-        (void)StringCchCopyW(
-            reason, capacity, L"The installed requeue PAK failed verification.");
         return false;
     }
     if (!file_exists(g_app.log_path)) {
@@ -977,6 +970,21 @@ static HWND find_game_window(void)
     return search.result;
 }
 
+static bool generation_is_enabled(unsigned generation)
+{
+    bool enabled;
+    EnterCriticalSection(&g_app.lock);
+    enabled = g_app.enabled && g_app.generation == generation;
+    LeaveCriticalSection(&g_app.lock);
+    return enabled;
+}
+
+/* Sleep on the worker without ignoring a shutdown request. */
+static void worker_pause(DWORD milliseconds)
+{
+    (void)WaitForSingleObject(g_app.stop_event, milliseconds);
+}
+
 static bool post_targeted_key(HWND game_window,
                               UINT virtual_key,
                               unsigned generation)
@@ -988,7 +996,7 @@ static bool post_targeted_key(HWND game_window,
 
     /*
      * Serialize the final generation check with the targeted key pair.  Once
-     * OFF commits under this lock, no later Tab/F can be posted by an older
+     * OFF commits under this lock, no later Tab can be posted by an older
      * action generation.  Holding it for the 80 ms pair also guarantees key-up.
      */
     EnterCriticalSection(&g_app.lock);
@@ -997,30 +1005,363 @@ static bool post_targeted_key(HWND game_window,
         return false;
     }
     if (PostMessageW(game_window, WM_KEYDOWN, virtual_key, down)) {
-        (void)WaitForSingleObject(g_app.stop_event, 80);
+        worker_pause(80);
         result = PostMessageW(game_window, WM_KEYUP, virtual_key, up) != FALSE;
     }
     LeaveCriticalSection(&g_app.lock);
     return result;
 }
 
-static bool generation_is_enabled(unsigned generation)
+/*
+ * Click a client-area point of the game window from the background.  The
+ * game only routes mouse messages while it believes it is the active
+ * application, so it is told that it is, by message, for the duration of the
+ * click, and told the opposite afterwards.  Nothing here changes which window
+ * the operating system considers foreground, and the pointer never moves.
+ */
+static bool post_targeted_click(HWND game_window,
+                                int x,
+                                int y,
+                                unsigned generation)
 {
-    bool enabled;
+    LPARAM position = MAKELPARAM(x, y);
+    bool clicked = false;
+
+    if (!generation_is_enabled(generation)) {
+        return false;
+    }
+    (void)PostMessageW(game_window, WM_ACTIVATEAPP, TRUE, 0);
+    (void)PostMessageW(game_window, WM_ACTIVATE, WA_ACTIVE, 0);
+    (void)PostMessageW(game_window, WM_SETFOCUS, 0, 0);
+    worker_pause(CLICK_ACTIVATE_SETTLE_MS);
+    if (generation_is_enabled(generation)) {
+        (void)PostMessageW(game_window, WM_MOUSEMOVE, 0, position);
+        worker_pause(CLICK_HOVER_MS);
+        if (PostMessageW(game_window, WM_LBUTTONDOWN, MK_LBUTTON, position)) {
+            worker_pause(CLICK_HOLD_MS);
+            clicked = PostMessageW(game_window, WM_LBUTTONUP, 0, position) !=
+                      FALSE;
+        }
+        worker_pause(CLICK_RELEASE_SETTLE_MS);
+    }
+    (void)PostMessageW(game_window, WM_KILLFOCUS, 0, 0);
+    (void)PostMessageW(game_window, WM_ACTIVATE, WA_INACTIVE, 0);
+    (void)PostMessageW(game_window, WM_ACTIVATEAPP, FALSE, 0);
+    return clicked;
+}
+
+typedef struct client_capture {
+    HDC dc;
+    HBITMAP bitmap;
+    HGDIOBJ previous;
+    BYTE *pixels;
+    int width;
+    int height;
+} client_capture;
+
+static void release_capture(client_capture *capture)
+{
+    if (capture->dc != NULL && capture->previous != NULL) {
+        SelectObject(capture->dc, capture->previous);
+    }
+    if (capture->bitmap != NULL) {
+        DeleteObject(capture->bitmap);
+    }
+    if (capture->dc != NULL) {
+        DeleteDC(capture->dc);
+    }
+    ZeroMemory(capture, sizeof(*capture));
+}
+
+/* Render the game client area into a top-down 32-bit buffer without showing it. */
+static bool capture_game_client(HWND game_window, client_capture *capture)
+{
+    RECT client;
+    BITMAPINFO info;
+    void *bits = NULL;
+
+    ZeroMemory(capture, sizeof(*capture));
+    if (!GetClientRect(game_window, &client) || client.right <= 0 ||
+        client.bottom <= 0 || client.right > 16384 || client.bottom > 16384) {
+        return false;
+    }
+    ZeroMemory(&info, sizeof(info));
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = client.right;
+    info.bmiHeader.biHeight = -client.bottom;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    capture->dc = CreateCompatibleDC(NULL);
+    if (capture->dc == NULL) {
+        return false;
+    }
+    capture->bitmap =
+        CreateDIBSection(capture->dc, &info, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (capture->bitmap == NULL || bits == NULL) {
+        release_capture(capture);
+        return false;
+    }
+    capture->previous = SelectObject(capture->dc, capture->bitmap);
+    if (!PrintWindow(game_window, capture->dc, PW_RENDERFULLCONTENT)) {
+        release_capture(capture);
+        return false;
+    }
+    GdiFlush();
+    capture->pixels = bits;
+    capture->width = client.right;
+    capture->height = client.bottom;
+    return true;
+}
+
+static bool pixel_is_bright(const BYTE *pixel)
+{
+    BYTE low = pixel[0];
+    BYTE high = pixel[0];
+
+    for (int channel = 1; channel < 3; ++channel) {
+        if (pixel[channel] < low) {
+            low = pixel[channel];
+        }
+        if (pixel[channel] > high) {
+            high = pixel[channel];
+        }
+    }
+    return low >= START_BRIGHT_MIN && (high - low) <= START_NEUTRAL_MAX;
+}
+
+/*
+ * Locate the START bar in a top-down BGRA client capture.  A band of rows in
+ * the lower-left region that is mostly light and neutral is the bar; the
+ * lettering inside it is dark, so the search tolerates gaps in both axes.
+ */
+static bool find_start_button(const BYTE *pixels,
+                              int width,
+                              int height,
+                              POINT *center)
+{
+    const int region_right = width * START_REGION_RIGHT_PCT / 100;
+    const int region_top = height * START_REGION_TOP_PCT / 100;
+    const int row_minimum = width * START_ROW_MIN_PCT / 100;
+    const int height_minimum = height * START_HEIGHT_MIN_PERMILLE / 1000;
+    const int height_maximum = height * START_HEIGHT_MAX_PERMILLE / 1000;
+    const int width_minimum = width * START_WIDTH_MIN_PCT / 100;
+    const size_t stride = (size_t)width * 4;
+    int best_top = -1;
+    int best_bottom = -1;
+    int band_top = -1;
+    int gap = 0;
+    int column_minimum;
+    int best_left = -1;
+    int best_right = -1;
+    int run_left = -1;
+    int run_gap = 0;
+
+    if (pixels == NULL || width < 64 || height < 64 || region_right <= 0 ||
+        region_top >= height) {
+        return false;
+    }
+    for (int y = region_top; y <= height; ++y) {
+        int count = 0;
+        bool bar_row;
+
+        if (y < height) {
+            const BYTE *row = pixels + (size_t)y * stride;
+            for (int x = 0; x < region_right; ++x) {
+                if (pixel_is_bright(row + (size_t)x * 4)) {
+                    ++count;
+                }
+            }
+        }
+        bar_row = y < height && count >= row_minimum;
+        if (bar_row) {
+            if (band_top < 0) {
+                band_top = y;
+            }
+            gap = 0;
+            continue;
+        }
+        if (band_top >= 0 && ++gap > 1) {
+            int band_bottom = y - gap;
+            int band_height = band_bottom - band_top + 1;
+            if (band_height >= height_minimum &&
+                band_height <= height_maximum &&
+                band_height > best_bottom - best_top) {
+                best_top = band_top;
+                best_bottom = band_bottom;
+            }
+            band_top = -1;
+            gap = 0;
+        }
+    }
+    if (best_top < 0) {
+        return false;
+    }
+    column_minimum = (best_bottom - best_top + 1) * START_COLUMN_MIN_PCT / 100;
+    for (int x = 0; x <= region_right; ++x) {
+        int count = 0;
+        bool bar_column;
+
+        if (x < region_right) {
+            for (int y = best_top; y <= best_bottom; ++y) {
+                if (pixel_is_bright(pixels + (size_t)y * stride +
+                                    (size_t)x * 4)) {
+                    ++count;
+                }
+            }
+        }
+        bar_column = x < region_right && count >= column_minimum;
+        if (bar_column) {
+            if (run_left < 0) {
+                run_left = x;
+            }
+            run_gap = 0;
+            continue;
+        }
+        if (run_left >= 0 && ++run_gap > 2) {
+            int run_right = x - run_gap;
+            if (run_right - run_left > best_right - best_left) {
+                best_left = run_left;
+                best_right = run_right;
+            }
+            run_left = -1;
+            run_gap = 0;
+        }
+    }
+    if (best_left < 0 || best_right - best_left + 1 < width_minimum) {
+        return false;
+    }
+    /*
+     * Lettering is sparse and a bar is solid.  A line of white text can pass
+     * the row and column tests on a large client, so the winning rectangle
+     * must also be mostly bright.
+     */
+    {
+        int bright = 0;
+        int area = (best_right - best_left + 1) * (best_bottom - best_top + 1);
+        for (int y = best_top; y <= best_bottom; ++y) {
+            const BYTE *row = pixels + (size_t)y * stride;
+            for (int x = best_left; x <= best_right; ++x) {
+                if (pixel_is_bright(row + (size_t)x * 4)) {
+                    ++bright;
+                }
+            }
+        }
+        if (area <= 0 || bright * 100 < area * START_DENSITY_MIN_PCT) {
+            return false;
+        }
+    }
+    center->x = (best_left + best_right) / 2;
+    center->y = (best_top + best_bottom) / 2;
+    return true;
+}
+
+/*
+ * Decide where START is for this click.  A fresh capture wins; otherwise the
+ * last detected position is reused when the client size still matches, and as
+ * a last resort the position measured on the reference client is scaled.
+ */
+static bool resolve_start_button(HWND game_window, start_button *button)
+{
+    client_capture capture;
+    POINT center;
+    RECT client;
+    start_button remembered;
+
+    ZeroMemory(button, sizeof(*button));
+    if (capture_game_client(game_window, &capture)) {
+        bool found = find_start_button(
+            capture.pixels, capture.width, capture.height, &center);
+        button->client_width = capture.width;
+        button->client_height = capture.height;
+        release_capture(&capture);
+        if (found) {
+            button->x = center.x;
+            button->y = center.y;
+            button->source = START_SOURCE_DETECTED;
+            return true;
+        }
+    } else if (GetClientRect(game_window, &client)) {
+        button->client_width = client.right;
+        button->client_height = client.bottom;
+    }
+    if (button->client_width <= 0 || button->client_height <= 0) {
+        return false;
+    }
     EnterCriticalSection(&g_app.lock);
-    enabled = g_app.enabled && g_app.generation == generation;
+    remembered = g_app.start;
     LeaveCriticalSection(&g_app.lock);
-    return enabled;
+    if (remembered.source != START_SOURCE_NONE &&
+        remembered.source != START_SOURCE_ESTIMATED &&
+        remembered.client_width == button->client_width &&
+        remembered.client_height == button->client_height) {
+        button->x = remembered.x;
+        button->y = remembered.y;
+        button->source = START_SOURCE_REMEMBERED;
+        return true;
+    }
+    button->x = MulDiv(button->client_width,
+                       START_FALLBACK_X_NUM,
+                       START_FALLBACK_X_DEN);
+    button->y = MulDiv(button->client_height,
+                       START_FALLBACK_Y_NUM,
+                       START_FALLBACK_Y_DEN);
+    button->source = START_SOURCE_ESTIMATED;
+    return true;
+}
+
+static const wchar_t *start_source_name(int source)
+{
+    switch (source) {
+    case START_SOURCE_DETECTED:
+        return L"detected in a background capture";
+    case START_SOURCE_REMEMBERED:
+        return L"reused from the last detection";
+    case START_SOURCE_ESTIMATED:
+        return L"estimated from the reference layout";
+    default:
+        return L"unknown";
+    }
+}
+
+/* Locate START on the open Trial Board and click it without activating the game. */
+static bool click_start_button(unsigned generation)
+{
+    HWND game_window = find_game_window();
+    start_button button;
+
+    if (game_window == NULL) {
+        return false;
+    }
+    if (!resolve_start_button(game_window, &button)) {
+        post_ui_event(L"The game client area could not be measured.");
+        return false;
+    }
+    EnterCriticalSection(&g_app.lock);
+    g_app.start = button;
+    LeaveCriticalSection(&g_app.lock);
+    if (button.source == START_SOURCE_DETECTED) {
+        save_remembered_start(&button);
+    } else {
+        post_ui_event(L"START was not visible in the capture; "
+                      L"position %ls.",
+                      start_source_name(button.source));
+    }
+    post_ui_event(L"Clicking START at %d, %d in a %d by %d client (%ls).",
+                  button.x,
+                  button.y,
+                  button.client_width,
+                  button.client_height,
+                  start_source_name(button.source));
+    return post_targeted_click(game_window, button.x, button.y, generation);
 }
 
 /*
  * The Trial Board refuses input for the whole push transition, measured at
- * 1.26 to 1.32 seconds on a live client.  The previous fixed 1.2 second wait
- * put F within a few milliseconds of that boundary, so the requeue landed on
- * a disabled panel most of the time.  The sequence below is driven by the
- * monitor loop instead: it posts Tab, waits for the game to log that the board
- * is accepting input again, and only then posts F.  It never blocks the loop,
- * because the loop is also what feeds it those records.
+ * 1.26 to 1.32 seconds on a live client.  The sequence below is driven by the
+ * monitor loop: it posts Tab, waits for the game to log that the board is
+ * accepting input again, and only then clicks START.  It never blocks the
+ * loop, because the loop is also what feeds it those records.
  */
 enum action_phase {
     ACTION_IDLE = 0,
@@ -1073,7 +1414,7 @@ static int advance_action_sequence_locked(uint64_t now_ms)
         /*
          * Tab is a toggle.  A pop rather than a push means the board was
          * already open and the press closed it, so it has to be reopened
-         * before F means anything at all.
+         * before START exists to click.
          */
         if (g_app.ui_board_pop_ms > g_app.action_tab_ms ||
             now_ms - g_app.action_tab_ms > ACTION_TAB_ACK_TIMEOUT_MS) {
@@ -1135,14 +1476,15 @@ static void post_action_note(int note)
 {
     switch (note) {
     case NOTE_REOPEN:
-        post_ui_event(L"Trial Board was already open; reopening it for F.");
+        post_ui_event(L"Trial Board was already open; reopening it.");
         break;
     case NOTE_TAB_RETRY:
         post_ui_event(L"Tab still not acknowledged; the game refuses it for "
                       L"now, still trying.");
         break;
     case NOTE_GATE_ASSUMED:
-        post_ui_event(L"Board opened but never reported ready; sending F anyway.");
+        post_ui_event(L"Board opened but never reported ready; "
+                      L"clicking START anyway.");
         break;
     default:
         break;
@@ -1202,43 +1544,54 @@ static void apply_engine_event_locked(const rq_event *event)
         if (!event->requeue_confirmed && !event->recovered) {
             g_app.display_total_ms = 0;
         }
-        set_status_locked(L"Searching for Imposter");
+        g_app.ui_state = UI_STATE_SEARCHING;
+        set_status_locked(L"Searching for an Invasion match");
         break;
     case RQ_EVENT_TIMEOUT:
         g_app.display_total_ms = event->total_search_ms;
-        set_status_locked(L"Timeout detected, preparing focusless requeue");
+        g_app.ui_state = UI_STATE_REQUEUE;
+        set_status_locked(L"Timeout detected, letting the client settle");
         break;
     case RQ_EVENT_SUCCEEDED:
         g_app.display_total_ms = event->total_search_ms;
         g_app.enabled = false;
         ++g_app.generation;
+        g_app.ui_state = UI_STATE_DONE;
         set_status_locked(L"Match found, automation stopped");
         break;
     case RQ_EVENT_CANCELED:
         g_app.display_total_ms = event->total_search_ms;
-        set_status_locked(L"Search canceled, state disarmed");
+        g_app.ui_state = UI_STATE_ARMED;
+        set_status_locked(L"Search canceled, waiting for a manual search");
         break;
     case RQ_EVENT_DISCONNECTED:
         g_app.display_total_ms = event->total_search_ms;
-        set_status_locked(L"Server disconnected, state safely disarmed");
+        g_app.ui_state = UI_STATE_ARMED;
+        set_status_locked(L"Server disconnected, waiting for a manual search");
         break;
     case RQ_EVENT_REQUEUE_POSTED:
-        set_status_locked(L"Requeue posted, waiting for server confirmation");
+        g_app.ui_state = UI_STATE_REQUEUE;
+        set_status_locked(L"START clicked, waiting for a new ticket");
         break;
     case RQ_EVENT_REQUEUE_RETRY:
-        set_status_locked(L"No ticket yet, preparing another targeted attempt");
+        g_app.ui_state = UI_STATE_REQUEUE;
+        set_status_locked(L"No ticket yet, preparing another attempt");
         break;
     case RQ_EVENT_REQUEUE_UNCONFIRMED:
-        set_status_locked(L"Requeue was not confirmed, attempts exhausted");
+        g_app.ui_state = UI_STATE_ARMED;
+        set_status_locked(L"Requeue not confirmed, start a search manually");
         break;
     case RQ_EVENT_REQUEUE_EXPIRED:
-        set_status_locked(L"Requeue timing window expired, no input sent");
+        g_app.ui_state = UI_STATE_ARMED;
+        set_status_locked(L"Timing window expired, no input was sent");
         break;
     case RQ_EVENT_HELPER_FAILED:
-        set_status_locked(L"Target game window unavailable, safely disarmed");
+        g_app.ui_state = UI_STATE_ARMED;
+        set_status_locked(L"Game window unavailable, waiting");
         break;
     case RQ_EVENT_REQUEUE_DUE:
-        set_status_locked(L"Opening the Trial Board for a targeted requeue");
+        g_app.ui_state = UI_STATE_REQUEUE;
+        set_status_locked(L"Opening the Trial Board");
         break;
     case RQ_EVENT_NONE:
     default:
@@ -1251,28 +1604,28 @@ static void describe_engine_event(const rq_event *event)
     switch (event->type) {
     case RQ_EVENT_SEARCHING:
         post_ui_event(event->recovered
-                          ? L"Recovered active Invasion search."
+                          ? L"Recovered an active Invasion search."
                           : (event->requeue_confirmed
                                  ? L"Requeue confirmed by a new Invasion ticket."
                                  : L"Invasion search detected."));
         break;
     case RQ_EVENT_TIMEOUT:
-        post_ui_event(L"Matching Invasion ticket timed out.");
+        post_ui_event(L"The armed Invasion ticket timed out.");
         break;
     case RQ_EVENT_SUCCEEDED:
         post_ui_event(L"Invasion match found; automation stopped.");
         break;
     case RQ_EVENT_CANCELED:
-        post_ui_event(L"Invasion search canceled; state disarmed.");
+        post_ui_event(L"Invasion search canceled; nothing armed.");
         break;
     case RQ_EVENT_DISCONNECTED:
-        post_ui_event(L"Game-server connection lost; no input sent.");
+        post_ui_event(L"Game server connection lost; no input sent.");
         break;
     case RQ_EVENT_REQUEUE_POSTED:
-        post_ui_event(L"Targeted Tab → F posted without activating the game.");
+        post_ui_event(L"Tab and START posted without activating the game.");
         break;
     case RQ_EVENT_REQUEUE_RETRY:
-        post_ui_event(L"No replacement ticket in time; retrying the sequence.");
+        post_ui_event(L"No replacement ticket in time; repeating the sequence.");
         break;
     case RQ_EVENT_REQUEUE_UNCONFIRMED:
         post_ui_event(L"No new Invasion ticket after the final attempt.");
@@ -1426,7 +1779,8 @@ static bool recover_log(HANDLE file,
     recovered = rq_engine_recovery_event(&g_app.engine);
     apply_engine_event_locked(&recovered);
     if (recovered.type == RQ_EVENT_NONE) {
-        set_status_locked(L"Monitoring, start an Imposter search manually");
+        g_app.ui_state = UI_STATE_ARMED;
+        set_status_locked(L"Armed, start the first Imposter search yourself");
     }
     LeaveCriticalSection(&g_app.lock);
     if (recovered.type != RQ_EVENT_NONE) {
@@ -1460,7 +1814,7 @@ static void tick_requeue(unsigned generation)
             step = STEP_TAB;
         }
     } else if (!g_app.engine.pending) {
-        /* The ticket resolved on its own, so no key belongs to it any more. */
+        /* The ticket resolved on its own, so no input belongs to it any more. */
         reset_action_sequence_locked();
     } else {
         step = advance_action_sequence_locked(now_ms);
@@ -1496,7 +1850,7 @@ static void tick_requeue(unsigned generation)
         }
         LeaveCriticalSection(&g_app.lock);
     } else if (step == STEP_CONFIRM) {
-        bool posted = post_key_to_game((UINT)L'F', generation);
+        bool posted = click_start_button(generation);
 
         EnterCriticalSection(&g_app.lock);
         reset_action_sequence_locked();
@@ -1687,11 +2041,20 @@ static void refresh_ui(void)
     bool enabled;
     uint32_t count;
     uint64_t elapsed_ms;
+    uint32_t attempt;
+    uint32_t attempts_max;
+    bool pending;
+    start_button start;
 
     EnterCriticalSection(&g_app.lock);
     enabled = g_app.enabled;
     count = g_app.display_requeue_count;
     elapsed_ms = current_elapsed_locked();
+    attempt = g_app.engine.requeue_attempt;
+    attempts_max = g_app.engine.max_requeue_attempts;
+    pending = g_app.engine.pending;
+    start = g_app.start;
+    g_app.display_state = g_app.ui_state;
     (void)StringCchCopyW(g_app.disp_status, STATUS_CAP, g_app.status);
     LeaveCriticalSection(&g_app.lock);
 
@@ -1699,13 +2062,44 @@ static void refresh_ui(void)
     format_elapsed(elapsed_ms, g_app.disp_timer, ARRAYSIZE(g_app.disp_timer));
     (void)StringCchPrintfW(g_app.disp_count,
                            ARRAYSIZE(g_app.disp_count),
-                           L"VERIFIED REQUEUES  ·  %lu",
+                           L"%lu",
                            (unsigned long)count);
+    if (pending) {
+        (void)StringCchPrintfW(g_app.disp_attempt,
+                               ARRAYSIZE(g_app.disp_attempt),
+                               L"%lu of %lu",
+                               (unsigned long)(attempt + 1 > attempts_max
+                                                   ? attempts_max
+                                                   : attempt + 1),
+                               (unsigned long)attempts_max);
+    } else {
+        (void)StringCchCopyW(g_app.disp_attempt,
+                             ARRAYSIZE(g_app.disp_attempt),
+                             L"idle");
+    }
+    if (start.source == START_SOURCE_NONE) {
+        (void)StringCchCopyW(
+            g_app.disp_start, ARRAYSIZE(g_app.disp_start), L"not located yet");
+    } else {
+        (void)StringCchPrintfW(g_app.disp_start,
+                               ARRAYSIZE(g_app.disp_start),
+                               L"%d, %d in %dx%d",
+                               start.x,
+                               start.y,
+                               start.client_width,
+                               start.client_height);
+    }
     SetWindowTextW(g_app.toggle_button,
                    enabled ? L"DISABLE AUTO-REQUEUE" : L"ENABLE AUTO-REQUEUE");
     if (g_app.window != NULL) {
         InvalidateRect(g_app.window, NULL, FALSE);
     }
+}
+
+static void refresh_game_presence(void)
+{
+    g_app.game_running = find_game_process() != 0;
+    g_app.game_window_found = g_app.game_running && find_game_window() != NULL;
 }
 
 static void trim_event_log(void)
@@ -1733,7 +2127,7 @@ static void append_event_log(const wchar_t *message)
     GetLocalTime(&time);
     (void)StringCchPrintfW(line,
                            ARRAYSIZE(line),
-                           L"[%02u:%02u:%02u] %ls\r\n",
+                           L"%02u:%02u:%02u  %ls\r\n",
                            (unsigned)time.wHour,
                            (unsigned)time.wMinute,
                            (unsigned)time.wSecond,
@@ -1760,12 +2154,20 @@ static void set_enabled(bool enabled)
     rq_engine_init(&g_app.engine);
     g_app.display_total_ms = 0;
     g_app.display_requeue_count = 0;
-    set_status_locked(enabled ? L"Monitoring, start an Imposter search manually"
+    g_app.ui_state = enabled ? UI_STATE_ARMED : UI_STATE_OFF;
+    set_status_locked(enabled ? L"Armed, start the first Imposter search yourself"
                               : L"Automation is off");
     LeaveCriticalSection(&g_app.lock);
     SetEvent(g_app.wake_event);
-    post_ui_event(enabled ? L"Auto-requeue enabled."
-                          : L"Auto-requeue disabled; pending action canceled.");
+    if (enabled) {
+        post_ui_event(L"Auto-requeue enabled.");
+        if (find_game_process() == 0) {
+            post_ui_event(L"The game is not running yet; it will be picked "
+                          L"up when it starts.");
+        }
+    } else {
+        post_ui_event(L"Auto-requeue disabled; pending action canceled.");
+    }
     refresh_ui();
 }
 
@@ -1800,78 +2202,10 @@ static bool browse_for_game(void)
     update_derived_paths();
     (void)WritePrivateProfileStringW(
         L"Paths", L"GameDir", g_app.game_dir, g_app.settings_path);
-    set_status(L"Game folder saved, verify or install the PAK");
+    set_status(L"Game folder saved");
     post_ui_event(L"Game folder updated.");
     refresh_ui();
     return true;
-}
-
-static bool locate_payload(wchar_t *output, size_t capacity)
-{
-    wchar_t payload_dir[PATH_CAP];
-    if (join_path(payload_dir, PATH_CAP, g_app.module_dir, L"payload") &&
-        join_path(output, capacity, payload_dir, PAK_NAME) &&
-        file_exists(output)) {
-        return true;
-    }
-    return join_path(output, capacity, g_app.module_dir, PAK_NAME) &&
-           file_exists(output);
-}
-
-static void install_or_repair_pak(void)
-{
-    wchar_t source[PATH_CAP];
-    wchar_t temporary[PATH_CAP];
-    wchar_t digest[65];
-    wchar_t existing_digest[65];
-    bool destination_exists;
-
-    if (!game_dir_is_valid(g_app.game_dir)) {
-        set_status(L"Locate the game folder before installing the PAK.");
-        return;
-    }
-    if (find_game_process() != 0) {
-        set_status(L"Close The Outlast Trials before changing the PAK.");
-        post_ui_event(L"PAK install blocked while the game is running.");
-        return;
-    }
-    if (!locate_payload(source, PATH_CAP) || !sha256_file(source, digest) ||
-        _wcsicmp(digest, EXPECTED_PAK_SHA256) != 0) {
-        set_status(L"The release payload PAK is missing or invalid.");
-        return;
-    }
-    destination_exists = file_exists(g_app.pak_path);
-    if (destination_exists && sha256_file(g_app.pak_path, existing_digest) &&
-        _wcsicmp(existing_digest, EXPECTED_PAK_SHA256) == 0) {
-        set_status(L"The verified requeue PAK is already installed.");
-        return;
-    }
-    if (destination_exists) {
-        set_status(L"A different PAK uses this name; it was not overwritten.");
-        post_ui_event(L"Back up or remove the conflicting PAK manually first.");
-        return;
-    }
-    (void)StringCchPrintfW(temporary,
-                           PATH_CAP,
-                           L"%ls.installing-%lu",
-                           g_app.pak_path,
-                           (unsigned long)GetCurrentProcessId());
-    (void)DeleteFileW(temporary);
-    if (!CopyFileW(source, temporary, FALSE) ||
-        !sha256_file(temporary, existing_digest) ||
-        _wcsicmp(existing_digest, EXPECTED_PAK_SHA256) != 0 ||
-        !MoveFileExW(temporary, g_app.pak_path, MOVEFILE_WRITE_THROUGH)) {
-        DWORD error = GetLastError();
-        (void)DeleteFileW(temporary);
-        if (error == ERROR_ACCESS_DENIED) {
-            set_status(L"Access denied. Run Install.bat from the release folder.");
-        } else {
-            set_status(L"PAK installation failed; the existing file was preserved.");
-        }
-        return;
-    }
-    set_status(L"PAK installed and SHA-256 verified.");
-    post_ui_event(L"PAK installed atomically and verified.");
 }
 
 static void open_log_folder(void)
@@ -1890,7 +2224,7 @@ static void apply_dark_titlebar(HWND window)
 {
     BOOL dark = TRUE;
     COLORREF chrome = CLR_BG;
-    DWORD rounded = 2;
+    DWORD square = 1;
     const DWORD immersive_dark_mode = 20;
     const DWORD immersive_dark_mode_legacy = 19;
     const DWORD caption_color = 35;
@@ -1907,7 +2241,7 @@ static void apply_dark_titlebar(HWND window)
     (void)DwmSetWindowAttribute(
         window, border_color, &chrome, sizeof(chrome));
     (void)DwmSetWindowAttribute(
-        window, corner_preference, &rounded, sizeof(rounded));
+        window, corner_preference, &square, sizeof(square));
 }
 
 static UINT system_dpi(void)
@@ -2055,40 +2389,28 @@ static void show_main_window(void)
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
-static void fill_rounded(HDC dc,
-                         const RECT *rectangle,
-                         int radius,
-                         COLORREF fill,
-                         COLORREF edge)
+static void fill_rect_color(HDC dc, const RECT *rectangle, COLORREF color)
 {
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, edge);
-    HGDIOBJ old_brush = SelectObject(dc, brush);
-    HGDIOBJ old_pen = SelectObject(dc, pen);
-
-    RoundRect(dc,
-              rectangle->left,
-              rectangle->top,
-              rectangle->right,
-              rectangle->bottom,
-              scale_ui(radius),
-              scale_ui(radius));
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
-    DeleteObject(pen);
+    HBRUSH brush = CreateSolidBrush(color);
+    FillRect(dc, rectangle, brush);
     DeleteObject(brush);
 }
 
-static void fill_circle(HDC dc, int x, int y, int diameter, COLORREF color)
+static void frame_rect_color(HDC dc, const RECT *rectangle, COLORREF color)
 {
     HBRUSH brush = CreateSolidBrush(color);
-    HGDIOBJ old_brush = SelectObject(dc, brush);
-    HGDIOBJ old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
-
-    Ellipse(dc, x, y, x + diameter + 1, y + diameter + 1);
-    SelectObject(dc, old_pen);
-    SelectObject(dc, old_brush);
+    FrameRect(dc, rectangle, brush);
     DeleteObject(brush);
+}
+
+static void draw_rule(HDC dc, int y)
+{
+    RECT rule;
+    rule.left = scale_ui(UI_MARGIN);
+    rule.top = scale_ui(y);
+    rule.right = scale_ui(UI_CLIENT_W - UI_MARGIN);
+    rule.bottom = rule.top + 1;
+    fill_rect_color(dc, &rule, CLR_LINE);
 }
 
 static int font_height(HDC dc, HFONT font)
@@ -2125,24 +2447,9 @@ static void draw_span(HDC dc,
     SetTextCharacterExtra(dc, 0);
 }
 
-static wchar_t button_glyph(UINT identifier)
-{
-    switch (identifier) {
-    case ID_LOCATE:
-        return 0xE8B7; /* folder */
-    case ID_INSTALL:
-        return 0xE896; /* download */
-    case ID_OPEN_LOG:
-        return 0xE8A5; /* document */
-    default:
-        return 0;
-    }
-}
-
 static void draw_button(const DRAWITEMSTRUCT *draw)
 {
     wchar_t text[128];
-    wchar_t glyph[2];
     RECT rectangle = draw->rcItem;
     bool primary = draw->CtlID == ID_TOGGLE;
     bool pressed = (draw->itemState & ODS_SELECTED) != 0;
@@ -2155,254 +2462,221 @@ static void draw_button(const DRAWITEMSTRUCT *draw)
     int x;
     int y;
 
-    FillRect(draw->hDC, &rectangle, g_app.background_brush);
-    glyph[0] = primary ? L'\0' : button_glyph(draw->CtlID);
-    glyph[1] = L'\0';
     if (primary && !g_app.display_enabled) {
-        fill = pressed ? CLR_ACCENT_PRESS : hot ? CLR_ACCENT_HOVER : CLR_ACCENT;
+        fill = pressed ? CLR_ACCENT_PRESS : hot ? CLR_ACCENT_HOT : CLR_ACCENT;
         edge = fill;
-        ink = RGB(255, 245, 247);
+        ink = RGB(255, 246, 248);
     } else if (primary) {
-        fill = pressed ? RGB(28, 13, 17)
-                       : hot ? RGB(54, 22, 30) : RGB(41, 18, 24);
-        edge = RGB(112, 38, 51);
-        ink = RGB(255, 128, 141);
+        fill = pressed ? CLR_PANEL_PRESS : hot ? CLR_PANEL_HOT : CLR_PANEL;
+        edge = CLR_ACCENT;
+        ink = hot ? CLR_ACCENT_HOT : CLR_ACCENT;
     } else {
-        fill = pressed ? RGB(18, 20, 25)
-                       : hot ? RGB(37, 41, 50) : RGB(27, 30, 37);
-        edge = hot ? RGB(66, 71, 85) : RGB(46, 50, 61);
-        ink = hot ? CLR_TEXT : RGB(210, 214, 223);
+        fill = pressed ? CLR_PANEL_PRESS : hot ? CLR_PANEL_HOT : CLR_PANEL;
+        edge = hot ? RGB(70, 72, 82) : CLR_LINE;
+        ink = hot ? CLR_TEXT : RGB(200, 202, 210);
     }
-    fill_rounded(draw->hDC, &rectangle, primary ? 12 : 10, fill, edge);
+    fill_rect_color(draw->hDC, &rectangle, fill);
+    frame_rect_color(draw->hDC, &rectangle, edge);
 
     text[0] = L'\0';
     GetWindowTextW(draw->hwndItem, text, ARRAYSIZE(text));
     SetBkMode(draw->hDC, TRANSPARENT);
     width = text_span(draw->hDC, font, text, 1);
-    if (glyph[0] != L'\0' && g_app.fonts[F_GLYPH] != NULL) {
-        int glyph_width = text_span(draw->hDC, g_app.fonts[F_GLYPH], glyph, 0);
-        int gap = scale_ui(9);
-        int total = glyph_width + gap + width;
+    x = rectangle.left + (rectangle.right - rectangle.left - width) / 2;
+    y = rectangle.top +
+        (rectangle.bottom - rectangle.top - font_height(draw->hDC, font)) / 2;
+    draw_span(draw->hDC, font, ink, 1, x, y, text);
+}
 
-        x = rectangle.left + (rectangle.right - rectangle.left - total) / 2;
-        y = rectangle.top +
-            (rectangle.bottom - rectangle.top -
-             font_height(draw->hDC, g_app.fonts[F_GLYPH])) / 2;
-        draw_span(draw->hDC,
-                  g_app.fonts[F_GLYPH],
-                  hot ? CLR_TEXT : RGB(146, 152, 165),
-                  0,
-                  x,
-                  y,
-                  glyph);
-        y = rectangle.top +
-            (rectangle.bottom - rectangle.top -
-             font_height(draw->hDC, font)) / 2;
-        draw_span(draw->hDC, font, ink, 1, x + glyph_width + gap, y, text);
-    } else {
-        x = rectangle.left + (rectangle.right - rectangle.left - width) / 2;
-        y = rectangle.top +
-            (rectangle.bottom - rectangle.top -
-             font_height(draw->hDC, font)) / 2;
-        draw_span(draw->hDC, font, ink, 1, x, y, text);
+static const wchar_t *state_label(int state)
+{
+    switch (state) {
+    case UI_STATE_ARMED:
+        return L"ARMED";
+    case UI_STATE_SEARCHING:
+        return L"SEARCHING";
+    case UI_STATE_REQUEUE:
+        return L"REQUEUING";
+    case UI_STATE_DONE:
+        return L"MATCH FOUND";
+    default:
+        return L"STANDBY";
     }
+}
+
+static void draw_stat(HDC dc,
+                      int x,
+                      int y,
+                      const wchar_t *label,
+                      const wchar_t *value,
+                      COLORREF value_color)
+{
+    draw_span(dc, g_app.fonts[F_LABEL], CLR_TEXT_FAINT, 2, x, y, label);
+    draw_span(dc,
+              g_app.fonts[F_VALUE],
+              value_color,
+              0,
+              x,
+              y + scale_ui(16),
+              value);
 }
 
 static void paint_window(HDC dc, const RECT *client)
 {
     RECT rect;
-    HBRUSH rule_brush;
-    wchar_t footer[192];
+    wchar_t footer[160];
+    const wchar_t *game_value;
+    COLORREF game_color;
+    COLORREF state_color;
+    int left = scale_ui(UI_MARGIN);
+    int right = scale_ui(UI_CLIENT_W - UI_MARGIN);
+    int column = (UI_CLIENT_W - 2 * UI_MARGIN) / 3;
     int width;
 
     FillRect(dc, client, g_app.background_brush);
     SetBkMode(dc, TRANSPARENT);
 
-    if (g_app.icon != NULL) {
-        (void)DrawIconEx(dc,
-                         scale_ui(28),
-                         scale_ui(24),
-                         g_app.icon,
-                         scale_ui(40),
-                         scale_ui(40),
-                         0,
-                         NULL,
-                         DI_NORMAL);
-    }
     draw_span(dc,
               g_app.fonts[F_TITLE],
               CLR_TEXT,
-              1,
-              scale_ui(82),
-              scale_ui(20),
+              2,
+              left,
+              scale_ui(22),
               L"OUTLAST REQUEUE");
+    width = text_span(dc, g_app.fonts[F_SMALL], APP_VERSION, 0);
     draw_span(dc,
-              g_app.fonts[F_SUB],
-              CLR_TEXT_DIM,
+              g_app.fonts[F_SMALL],
+              CLR_TEXT_FAINT,
               0,
-              scale_ui(83),
-              scale_ui(56),
-              L"Focusless Invasion matchmaking recovery");
-    {
-        const wchar_t *chip = L"v" APP_VERSION;
-        int chip_text = text_span(dc, g_app.fonts[F_CHIP], chip, 1);
-        int chip_height = scale_ui(22);
+              right - width,
+              scale_ui(26),
+              APP_VERSION);
+    draw_rule(dc, 56);
 
-        rect.right = scale_ui(UI_CLIENT_W - 28);
-        rect.left = rect.right - chip_text - scale_ui(24);
-        rect.top = scale_ui(30);
-        rect.bottom = rect.top + chip_height;
-        fill_rounded(dc, &rect, 11, CLR_CARD, CLR_CARD_EDGE);
-        draw_span(dc,
-                  g_app.fonts[F_CHIP],
-                  CLR_TEXT_DIM,
-                  1,
-                  rect.left + scale_ui(12),
-                  rect.top +
-                      (chip_height - font_height(dc, g_app.fonts[F_CHIP])) / 2,
-                  chip);
+    state_color = g_app.display_state == UI_STATE_OFF ? CLR_TEXT_FAINT
+                                                      : CLR_ACCENT;
+    if (g_app.display_state == UI_STATE_REQUEUE && (g_app.pulse & 1) != 0) {
+        state_color = CLR_ACCENT_HOT;
     }
-
-    rect.left = scale_ui(28);
+    draw_span(dc,
+              g_app.fonts[F_STATE],
+              state_color,
+              3,
+              left,
+              scale_ui(76),
+              state_label(g_app.display_state));
+    rect.left = left;
     rect.top = scale_ui(96);
-    rect.right = scale_ui(572);
-    rect.bottom = scale_ui(336);
-    fill_rounded(dc, &rect, 14, CLR_CARD, CLR_CARD_EDGE);
-    {
-        const wchar_t *pill = g_app.display_enabled ? L"AUTO-REQUEUE ARMED"
-                                                    : L"STANDBY";
-        COLORREF pill_fill;
-        COLORREF pill_edge;
-        COLORREF pill_ink;
-        COLORREF dot;
-        int pill_text = text_span(dc, g_app.fonts[F_PILL], pill, 2);
-        int pill_height = scale_ui(30);
-        int dot_diameter = scale_ui(8);
-        int pad = scale_ui(14);
-        int gap = scale_ui(8);
-        int pill_width = pad + dot_diameter + gap + pill_text + pad;
-        RECT pill_rect;
-
-        if (g_app.display_enabled) {
-            pill_fill = RGB(45, 18, 24);
-            pill_edge = RGB(99, 32, 45);
-            pill_ink = RGB(255, 122, 136);
-            dot = (g_app.pulse & 1) != 0 ? RGB(255, 92, 108)
-                                         : RGB(196, 44, 62);
-        } else {
-            pill_fill = RGB(28, 30, 38);
-            pill_edge = RGB(50, 54, 66);
-            pill_ink = RGB(160, 166, 178);
-            dot = RGB(112, 118, 130);
-        }
-        pill_rect.left = scale_ui(300) - pill_width / 2;
-        pill_rect.top = scale_ui(120);
-        pill_rect.right = pill_rect.left + pill_width;
-        pill_rect.bottom = pill_rect.top + pill_height;
-        fill_rounded(dc, &pill_rect, 15, pill_fill, pill_edge);
-        fill_circle(dc,
-                    pill_rect.left + pad,
-                    pill_rect.top + (pill_height - dot_diameter) / 2,
-                    dot_diameter,
-                    dot);
-        draw_span(dc,
-                  g_app.fonts[F_PILL],
-                  pill_ink,
-                  2,
-                  pill_rect.left + pad + dot_diameter + gap,
-                  pill_rect.top +
-                      (pill_height - font_height(dc, g_app.fonts[F_PILL])) / 2,
-                  pill);
-    }
-    rect.left = scale_ui(28);
-    rect.top = scale_ui(156);
-    rect.right = scale_ui(572);
-    rect.bottom = scale_ui(244);
+    rect.right = right;
+    rect.bottom = scale_ui(172);
     SelectObject(dc, g_app.fonts[F_TIMER]);
-    SetTextColor(dc, g_app.display_enabled ? CLR_TEXT : RGB(122, 128, 140));
+    SetTextColor(dc, g_app.display_enabled ? CLR_TEXT : RGB(110, 112, 122));
     (void)DrawTextW(dc,
                     g_app.disp_timer,
                     -1,
                     &rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-    rect.left = scale_ui(58);
-    rect.top = scale_ui(248);
-    rect.right = scale_ui(542);
-    rect.bottom = scale_ui(286);
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    rect.left = left;
+    rect.top = scale_ui(178);
+    rect.right = right;
+    rect.bottom = scale_ui(214);
     SelectObject(dc, g_app.fonts[F_STATUS]);
     SetTextColor(dc, CLR_TEXT_DIM);
     (void)DrawTextW(dc,
                     g_app.disp_status,
                     -1,
                     &rect,
-                    DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
-    width = text_span(dc, g_app.fonts[F_TINY], g_app.disp_count, 2);
-    draw_span(dc,
-              g_app.fonts[F_TINY],
-              CLR_TEXT_FAINT,
-              2,
-              scale_ui(300) - width / 2,
-              scale_ui(296),
-              g_app.disp_count);
+                    DT_LEFT | DT_WORDBREAK | DT_NOPREFIX);
+    draw_rule(dc, 218);
+
+    if (!g_app.game_running) {
+        game_value = L"not running";
+        game_color = CLR_TEXT_DIM;
+    } else if (!g_app.game_window_found) {
+        game_value = L"no window";
+        game_color = CLR_ACCENT;
+    } else {
+        game_value = L"window found";
+        game_color = CLR_TEXT;
+    }
+    draw_stat(dc, left, scale_ui(234), L"REQUEUES", g_app.disp_count, CLR_TEXT);
+    draw_stat(dc,
+              left + scale_ui(column),
+              scale_ui(234),
+              L"ATTEMPT",
+              g_app.disp_attempt,
+              CLR_TEXT);
+    draw_stat(dc,
+              left + scale_ui(column * 2),
+              scale_ui(234),
+              L"GAME",
+              game_value,
+              game_color);
+    draw_rule(dc, 296);
 
     draw_span(dc,
-              g_app.fonts[F_SMALL],
+              g_app.fonts[F_LABEL],
               CLR_TEXT_FAINT,
               2,
-              scale_ui(30),
-              scale_ui(480),
+              left,
+              scale_ui(432),
               L"GAME FOLDER");
-    rect.left = scale_ui(30);
-    rect.top = scale_ui(496);
-    rect.right = scale_ui(570);
-    rect.bottom = scale_ui(514);
+    rect.left = left;
+    rect.top = scale_ui(448);
+    rect.right = right;
+    rect.bottom = scale_ui(466);
     SelectObject(dc, g_app.fonts[F_PATH]);
     SetTextColor(dc,
-                 g_app.game_dir[0] != L'\0' ? RGB(196, 201, 211)
-                                            : CLR_TEXT_FAINT);
+                 g_app.game_dir[0] != L'\0' ? RGB(196, 198, 206)
+                                            : CLR_TEXT_DIM);
     (void)DrawTextW(dc,
                     g_app.game_dir[0] != L'\0'
                         ? g_app.game_dir
-                        : L"Not located, press LOCATE GAME",
+                        : L"Not located, press GAME FOLDER",
                     -1,
                     &rect,
                     DT_LEFT | DT_SINGLELINE | DT_PATH_ELLIPSIS | DT_NOPREFIX);
 
     draw_span(dc,
-              g_app.fonts[F_SMALL],
+              g_app.fonts[F_LABEL],
               CLR_TEXT_FAINT,
               2,
-              scale_ui(30),
-              scale_ui(526),
-              L"ACTIVITY");
-    width = text_span(dc, g_app.fonts[F_SMALL], L"ACTIVITY", 2);
-    rect.left = scale_ui(30) + width + scale_ui(12);
-    rect.top = scale_ui(526) + font_height(dc, g_app.fonts[F_SMALL]) / 2;
-    rect.right = scale_ui(572);
-    rect.bottom = rect.top + 1;
-    rule_brush = CreateSolidBrush(CLR_CARD_EDGE);
-    FillRect(dc, &rect, rule_brush);
-    DeleteObject(rule_brush);
+              left,
+              scale_ui(480),
+              L"START BUTTON");
+    draw_span(dc,
+              g_app.fonts[F_PATH],
+              RGB(196, 198, 206),
+              0,
+              left,
+              scale_ui(496),
+              g_app.disp_start);
 
-    rect.left = scale_ui(28);
-    rect.top = scale_ui(546);
-    rect.right = scale_ui(572);
-    rect.bottom = scale_ui(694);
-    fill_rounded(dc, &rect, 12, CLR_LOG_BG, CLR_CARD_EDGE);
+    draw_span(dc,
+              g_app.fonts[F_LABEL],
+              CLR_TEXT_FAINT,
+              2,
+              left,
+              scale_ui(524),
+              L"ACTIVITY");
+    rect.left = left;
+    rect.top = scale_ui(542);
+    rect.right = right;
+    rect.bottom = scale_ui(668);
+    fill_rect_color(dc, &rect, CLR_PANEL);
+    frame_rect_color(dc, &rect, CLR_LINE);
 
     (void)StringCchPrintfW(footer,
                            ARRAYSIZE(footer),
-                           L"v%ls   ·   by %ls   ·   verified on build %ls",
-                           APP_VERSION,
+                           L"by %ls, verified on game build %ls",
                            APP_AUTHOR,
                            SUPPORTED_BUILD_ID);
-    width = text_span(dc, g_app.fonts[F_TINY], footer, 1);
     draw_span(dc,
-              g_app.fonts[F_TINY],
+              g_app.fonts[F_SMALL],
               CLR_TEXT_FAINT,
-              1,
-              scale_ui(300) - width / 2,
-              scale_ui(704),
+              0,
+              left,
+              scale_ui(678),
               footer);
 }
 
@@ -2414,24 +2688,33 @@ static LRESULT CALLBACK window_procedure(HWND window,
     switch (message) {
     case WM_CREATE:
         apply_dark_titlebar(window);
-        g_app.toggle_button = create_button(
-            window, L"ENABLE AUTO-REQUEUE", ID_TOGGLE, 28, 352, 544, 52);
+        g_app.toggle_button = create_button(window,
+                                            L"ENABLE AUTO-REQUEUE",
+                                            ID_TOGGLE,
+                                            UI_MARGIN,
+                                            314,
+                                            UI_CLIENT_W - 2 * UI_MARGIN,
+                                            48);
         g_app.locate_button = create_button(
-            window, L"LOCATE GAME", ID_LOCATE, 28, 418, 173, 44);
-        g_app.install_button = create_button(
-            window, L"INSTALL PAK", ID_INSTALL, 213, 418, 173, 44);
-        g_app.log_button = create_button(
-            window, L"OPEN LOG", ID_OPEN_LOG, 398, 418, 174, 44);
+            window, L"GAME FOLDER", ID_LOCATE, UI_MARGIN, 372, 228, 40);
+        g_app.log_button = create_button(window,
+                                         L"OPEN LOG FOLDER",
+                                         ID_OPEN_LOG,
+                                         UI_CLIENT_W - UI_MARGIN - 228,
+                                         372,
+                                         228,
+                                         40);
         g_app.event_log = CreateWindowExW(0,
                                           L"EDIT",
                                           L"",
                                           WS_CHILD | WS_VISIBLE |
                                               ES_MULTILINE | ES_AUTOVSCROLL |
                                               ES_READONLY,
-                                          scale_ui(40),
-                                          scale_ui(556),
-                                          scale_ui(520),
-                                          scale_ui(128),
+                                          scale_ui(UI_MARGIN + 8),
+                                          scale_ui(550),
+                                          scale_ui(UI_CLIENT_W -
+                                                   2 * UI_MARGIN - 16),
+                                          scale_ui(110),
                                           window,
                                           NULL,
                                           g_app.instance,
@@ -2441,9 +2724,10 @@ static LRESULT CALLBACK window_procedure(HWND window,
         SendMessageW(g_app.event_log,
                      EM_SETMARGINS,
                      EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                     MAKELPARAM(scale_ui(6), scale_ui(6)));
+                     MAKELPARAM(scale_ui(4), scale_ui(4)));
         SetTimer(window, TIMER_UI, 1000, NULL);
-        append_event_log(L"Ready. Start the first Imposter search manually.");
+        append_event_log(L"Ready. Start the first Imposter search yourself.");
+        refresh_game_presence();
         refresh_ui();
         return 0;
 
@@ -2460,10 +2744,6 @@ static LRESULT CALLBACK window_procedure(HWND window,
         case ID_LOCATE:
             (void)browse_for_game();
             return 0;
-        case ID_INSTALL:
-            install_or_repair_pak();
-            refresh_ui();
-            return 0;
         case ID_OPEN_LOG:
             open_log_folder();
             return 0;
@@ -2479,8 +2759,8 @@ static LRESULT CALLBACK window_procedure(HWND window,
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLOREDIT: {
         HDC device = (HDC)wparam;
-        SetTextColor(device, RGB(176, 182, 194));
-        SetBkColor(device, CLR_LOG_BG);
+        SetTextColor(device, RGB(176, 178, 188));
+        SetBkColor(device, CLR_PANEL);
         return (LRESULT)g_app.panel_brush;
     }
 
@@ -2531,6 +2811,9 @@ static LRESULT CALLBACK window_procedure(HWND window,
     case WM_TIMER:
         if (wparam == TIMER_UI) {
             ++g_app.pulse;
+            if ((g_app.pulse & 1) == 0) {
+                refresh_game_presence();
+            }
             refresh_ui();
         }
         return 0;
@@ -2616,26 +2899,53 @@ static int run_diagnostics(void)
 {
     wchar_t reason[STATUS_CAP];
     wchar_t build[64] = L"unavailable";
-    wchar_t digest[65] = L"unavailable";
+    HWND game_window;
     bool valid;
 
     (void)parse_build_id(build, ARRAYSIZE(build));
-    (void)sha256_file(g_app.pak_path, digest);
     valid = validate_install(reason, ARRAYSIZE(reason));
+    game_window = find_game_window();
     cli_print(L"Outlast Requeue %ls, created by %ls\r\n",
               APP_VERSION,
               APP_AUTHOR);
     cli_print(L"Game: %ls\r\n", g_app.game_dir);
     cli_print(L"Log: %ls\r\n", g_app.log_path);
-    cli_print(L"PAK: %ls\r\n", g_app.pak_path);
     cli_print(L"Build ID: %ls (last verified: %ls; not enforced)\r\n",
               build,
               SUPPORTED_BUILD_ID);
-    cli_print(L"PAK SHA-256: %ls\r\n", digest);
     cli_print(L"Game process: %ls\r\n",
               find_game_process() != 0 ? L"running" : L"not running");
     cli_print(L"Exact game window: %ls\r\n",
-              find_game_window() != NULL ? L"found" : L"not found");
+              game_window != NULL ? L"found" : L"not found");
+    if (game_window != NULL) {
+        client_capture capture;
+        if (capture_game_client(game_window, &capture)) {
+            POINT center;
+            bool found = find_start_button(
+                capture.pixels, capture.width, capture.height, &center);
+            cli_print(L"Client area: %d by %d\r\n",
+                      capture.width,
+                      capture.height);
+            if (found) {
+                cli_print(L"START button: %ld, %ld\r\n",
+                          (long)center.x,
+                          (long)center.y);
+            } else {
+                cli_print(L"START button: not visible (open the Trial Board "
+                          L"on the TRIAL tab and run this again)\r\n");
+            }
+            release_capture(&capture);
+        } else {
+            cli_print(L"Client capture: failed\r\n");
+        }
+    }
+    if (g_app.start.source != START_SOURCE_NONE) {
+        cli_print(L"Remembered START: %d, %d in %d by %d\r\n",
+                  g_app.start.x,
+                  g_app.start.y,
+                  g_app.start.client_width,
+                  g_app.start.client_height);
+    }
     cli_print(L"Preflight: %ls%ls%ls\r\n",
               valid ? L"PASS" : L"FAIL",
               valid ? L"" : L": ",
@@ -2643,10 +2953,70 @@ static int run_diagnostics(void)
     return valid ? 0 : 2;
 }
 
+static void fill_test_rect(BYTE *pixels,
+                           int width,
+                           int left,
+                           int top,
+                           int right,
+                           int bottom,
+                           BYTE red,
+                           BYTE green,
+                           BYTE blue)
+{
+    for (int y = top; y < bottom; ++y) {
+        for (int x = left; x < right; ++x) {
+            BYTE *pixel = pixels + ((size_t)y * (size_t)width + (size_t)x) * 4;
+            pixel[0] = blue;
+            pixel[1] = green;
+            pixel[2] = red;
+            pixel[3] = 255;
+        }
+    }
+}
+
+static int run_start_detection_self_test(void)
+{
+    const int width = 640;
+    const int height = 360;
+    BYTE *pixels = HeapAlloc(GetProcessHeap(),
+                             HEAP_ZERO_MEMORY,
+                             (SIZE_T)width * (SIZE_T)height * 4);
+    POINT center;
+    int result = 0;
+
+    if (pixels == NULL) {
+        return 16;
+    }
+    /* Dark red board, a light polaroid frame higher up, small caption text. */
+    fill_test_rect(pixels, width, 0, 0, width, height, 40, 8, 10);
+    fill_test_rect(pixels, width, 14, 160, 100, 215, 230, 230, 230);
+    fill_test_rect(pixels, width, 18, 164, 96, 211, 60, 50, 50);
+    for (int glyph = 0; glyph < 24; ++glyph) {
+        int x = 30 + glyph * 8;
+        fill_test_rect(pixels, width, x, 276, x + 2, 288, 235, 235, 235);
+        fill_test_rect(pixels, width, x, 276, x + 6, 278, 235, 235, 235);
+    }
+    if (find_start_button(pixels, width, height, &center)) {
+        result = 17;
+    }
+    /* The START bar with dark lettering through its middle. */
+    fill_test_rect(pixels, width, 35, 311, 194, 327, 219, 219, 219);
+    fill_test_rect(pixels, width, 100, 316, 130, 322, 30, 30, 30);
+    if (result == 0 &&
+        (!find_start_button(pixels, width, height, &center) ||
+         center.x < 110 || center.x > 118 || center.y < 317 ||
+         center.y > 320)) {
+        result = 18;
+    }
+    HeapFree(GetProcessHeap(), 0, pixels);
+    return result;
+}
+
 static int run_self_test(void)
 {
     rq_engine engine;
     rq_event event;
+    int detection;
 
     rq_engine_init(&engine);
     event = rq_engine_process_line(
@@ -2697,6 +3067,10 @@ static int run_self_test(void)
             live_timeout_is_too_old(stale, written + LIVE_TIMEOUT_MAX_AGE_MS)) {
             return 14;
         }
+    }
+    detection = run_start_detection_self_test();
+    if (detection != 0) {
+        return detection;
     }
     cli_print(L"SELF_TEST_PASS\r\n");
     return 0;
@@ -2775,28 +3149,20 @@ int WINAPI wWinMain(HINSTANCE instance,
     g_app.stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
     g_app.wake_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     g_app.background_brush = CreateSolidBrush(CLR_BG);
-    g_app.panel_brush = CreateSolidBrush(CLR_LOG_BG);
+    g_app.panel_brush = CreateSolidBrush(CLR_PANEL);
     g_app.ui_dpi = system_dpi();
-    g_app.fonts[F_TITLE] = create_font_preferring(
-        21, FW_BOLD, L"Segoe UI Variable Display", L"Segoe UI");
-    g_app.fonts[F_SUB] = create_font(10, FW_NORMAL, L"Segoe UI");
-    g_app.fonts[F_PILL] = create_font(9, FW_BOLD, L"Segoe UI");
+    g_app.fonts[F_TITLE] = create_font(12, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_STATE] = create_font(9, FW_SEMIBOLD, L"Segoe UI");
     g_app.fonts[F_TIMER] = create_font_preferring(
-        52, FW_SEMIBOLD, L"Segoe UI Variable Display", L"Segoe UI");
+        50, FW_SEMIBOLD, L"Segoe UI Variable Display", L"Segoe UI");
     g_app.fonts[F_STATUS] = create_font(10, FW_NORMAL, L"Segoe UI");
-    g_app.fonts[F_SMALL] = create_font(8, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_TINY] = create_font(8, FW_NORMAL, L"Segoe UI");
+    g_app.fonts[F_LABEL] = create_font(8, FW_SEMIBOLD, L"Segoe UI");
+    g_app.fonts[F_VALUE] = create_font(14, FW_SEMIBOLD, L"Segoe UI");
     g_app.fonts[F_PATH] = create_font(9, FW_NORMAL, L"Segoe UI");
     g_app.fonts[F_BTN_MAIN] = create_font(11, FW_SEMIBOLD, L"Segoe UI");
     g_app.fonts[F_BTN] = create_font(9, FW_SEMIBOLD, L"Segoe UI");
-    g_app.fonts[F_CHIP] = create_font(8, FW_SEMIBOLD, L"Segoe UI");
     g_app.fonts[F_LOG] = create_font(9, FW_NORMAL, L"Consolas");
-    g_app.fonts[F_GLYPH] =
-        create_font_exact(12, FW_NORMAL, L"Segoe Fluent Icons");
-    if (g_app.fonts[F_GLYPH] == NULL) {
-        g_app.fonts[F_GLYPH] =
-            create_font_exact(12, FW_NORMAL, L"Segoe MDL2 Assets");
-    }
+    g_app.fonts[F_SMALL] = create_font(8, FW_NORMAL, L"Segoe UI");
     g_app.icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
 
     ZeroMemory(&window_class, sizeof(window_class));

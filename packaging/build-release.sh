@@ -2,24 +2,30 @@
 set -euo pipefail
 
 # Environment overrides:
-#   VERSION             Release version (default: 1.0.3)
-#   WINDOWS_EXE         Cross-built native executable
-#   PAK_FILE            PAK bundled with the Windows archive
+#   VERSION             Release version (default: 1.0.4)
+#   WINDOWS_EXE         Built native executable
 #   DIST_DIR            Output directory
 #   PLATFORMS           Space-separated list: "windows", "source", or both
+#   MAKE                make program (default: make, or mingw32-make when present)
+#   MAKE_ARGS           Extra make arguments, for example CROSS= on a native Windows toolchain
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
-VERSION="${VERSION:-1.0.3}"
+VERSION="${VERSION:-1.0.4}"
 PLATFORMS="${PLATFORMS:-windows source}"
 WINDOWS_EXE="${WINDOWS_EXE:-$ROOT_DIR/build/windows/OutlastRequeue.exe}"
-PAK_FILE="${PAK_FILE:-$ROOT_DIR/assets/zzz-OutlastRequeue_P.pak}"
 DIST_DIR="${DIST_DIR:-$ROOT_DIR/release}"
+if [[ -z "${MAKE:-}" ]]; then
+    if command -v mingw32-make >/dev/null 2>&1 && ! command -v make >/dev/null 2>&1; then
+        MAKE=mingw32-make
+    else
+        MAKE=make
+    fi
+fi
+MAKE_ARGS="${MAKE_ARGS:-}"
 
-PAK_NAME="zzz-OutlastRequeue_P.pak"
-EXPECTED_PAK_SHA256="1998125961ea66886ae41d71fe15ec2d555d045b980bc487ac5a6ea2a92d0c54"
-EXPECTED_BUILD_ID="24382135"
+EXPECTED_BUILD_ID="25112110"
 EXPECTED_VERIFY_TIMEOUT_MS="25000"
 EXPECTED_AUTHOR="whispersgone"
 CREATED_ARCHIVES=()
@@ -41,28 +47,19 @@ wants_platform() {
     return 1
 }
 
-verify_pak() {
-    local file="$1"
-    [[ -f "$file" ]] || die "PAK not found: $file"
-
-    local actual
-    actual="$(sha256sum "$file" | awk '{print $1}')"
-    [[ "$actual" == "$EXPECTED_PAK_SHA256" ]] \
-        || die "PAK hash mismatch for $file (found $actual)"
-}
-
 assert_clean_payload() {
     local directory="$1"
     local findings
 
-    # Refuse common personal-path and credential forms. The approved PAK hash is
-    # intentionally not treated as secret material.
+    # Refuse common personal-path and credential forms.
     findings="$(
-        rg -a -n --no-messages \
+        grep -a -n -r -E \
             -e '/home/[A-Za-z0-9._-]+/' \
             -e '[A-Za-z]:\\Users\\[^\\[:space:]]+' \
             -e '0x[[:xdigit:]]{64}' \
-            -e '(?i)(credential|password|secret)[[:space:]]*[:=][[:space:]]*[^[:space:]]+' \
+            -e '[Cc]redential[[:space:]]*[:=][[:space:]]*[^[:space:]]+' \
+            -e '[Pp]assword[[:space:]]*[:=][[:space:]]*[^[:space:]]+' \
+            -e '[Ss]ecret[[:space:]]*[:=][[:space:]]*[^[:space:]]+' \
             "$directory" || true
     )"
     if [[ -n "$findings" ]]; then
@@ -87,10 +84,26 @@ make_zip() {
     local destination="$DIST_DIR/$package_name.zip"
 
     rm -f -- "$destination"
-    (
-        cd -- "$stage_root"
-        zip -X -q -r "$destination" "$package_name"
-    )
+    if command -v zip >/dev/null 2>&1; then
+        (
+            cd -- "$stage_root"
+            zip -X -q -r "$destination" "$package_name"
+        )
+    else
+        (
+            cd -- "$stage_root"
+            "$PYTHON" - "$destination" "$package_name" <<'EOF'
+import os, sys, zipfile
+destination, name = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED) as archive:
+    for root, directories, files in os.walk(name):
+        directories.sort()
+        for file in sorted(files):
+            path = os.path.join(root, file)
+            archive.write(path, path.replace(os.sep, "/"))
+EOF
+        )
+    fi
     CREATED_ARCHIVES+=("$destination")
     echo "created $destination"
 }
@@ -118,29 +131,23 @@ assert_source_payload() {
         \( -iname '*.pak' -o -iname '*.uasset' -o -iname '*.uexp' \) \
         -print -quit)"
     [[ -z "$finding" ]] \
-        || die "source payload contains a copyrighted game asset: $finding"
-    finding="$(find "$directory" -type d \
-        \( -name extracted -o -name mod-staging \) -print -quit)"
-    [[ -z "$finding" ]] \
-        || die "source payload contains a forbidden game-asset staging directory: $finding"
+        || die "source payload contains a game asset: $finding"
 }
 
 verify_release_constants() {
-    rg -q '#define RQ_DEFAULT_VERIFY_TIMEOUT_MS UINT64_C\('"$EXPECTED_VERIFY_TIMEOUT_MS"'\)' \
+    grep -qE '#define RQ_DEFAULT_VERIFY_TIMEOUT_MS UINT64_C\('"$EXPECTED_VERIFY_TIMEOUT_MS"'\)' \
         "$ROOT_DIR/src/common/requeue_engine.h" \
         || die "C confirmation timeout does not match release metadata"
-    rg -q '"confirmation_timeout_ms":[[:space:]]*'"$EXPECTED_VERIFY_TIMEOUT_MS" \
+    grep -qE '"confirmation_timeout_ms":[[:space:]]*'"$EXPECTED_VERIFY_TIMEOUT_MS" \
         "$SCRIPT_DIR/compatibility.json" \
         || die "compatibility.json confirmation timeout is missing or stale"
-    rg -q 'SUPPORTED_BUILD_ID L"'"$EXPECTED_BUILD_ID"'"' \
+    grep -qE 'SUPPORTED_BUILD_ID L"'"$EXPECTED_BUILD_ID"'"' \
         "$ROOT_DIR/src/windows/outlast_requeue_windows.c" \
         || die "Windows last-verified build ID is stale"
-    rg -q 'EXPECTED_PAK_SHA256.*\\' \
+    grep -qE 'APP_VERSION L"'"$VERSION"'"' \
         "$ROOT_DIR/src/windows/outlast_requeue_windows.c" \
-        || die "Windows PAK hash declaration is missing"
-    rg -q "$EXPECTED_PAK_SHA256" "$ROOT_DIR/src/windows/outlast_requeue_windows.c" \
-        || die "Windows PAK hash is stale"
-    rg -q '"author":[[:space:]]*"'"$EXPECTED_AUTHOR"'"' \
+        || die "Windows APP_VERSION does not match $VERSION"
+    grep -qE '"author":[[:space:]]*"'"$EXPECTED_AUTHOR"'"' \
         "$SCRIPT_DIR/compatibility.json" \
         || die "release author attribution is missing or stale"
 }
@@ -149,20 +156,21 @@ build_and_verify_windows() {
     local default_executable="$ROOT_DIR/build/windows/OutlastRequeue.exe"
 
     if [[ "$WINDOWS_EXE" == "$default_executable" ]]; then
-        make -C "$ROOT_DIR/src/windows" clean all
+        # shellcheck disable=SC2086
+        "$MAKE" -C "$ROOT_DIR/src/windows" clean all $MAKE_ARGS
     fi
     [[ -f "$WINDOWS_EXE" ]] || die "Windows executable not found: $WINDOWS_EXE"
     "$ROOT_DIR/tests/audit_windows_binary.sh" "$WINDOWS_EXE"
-    file "$WINDOWS_EXE" | rg -q 'PE32\+ executable.*GUI.*x86-64' \
+    file "$WINDOWS_EXE" | grep -qE 'PE32\+ executable.*GUI.*x86-64' \
         || die "Windows payload is not a PE64 GUI executable"
-    strings -el "$WINDOWS_EXE" | rg -Fxq "$VERSION" \
+    strings -el "$WINDOWS_EXE" | grep -Fxq "$VERSION" \
         || die "Windows executable does not embed release version $VERSION"
-    strings -el "$WINDOWS_EXE" | rg -Fxq "$EXPECTED_BUILD_ID" \
+    strings -el "$WINDOWS_EXE" | grep -Fxq "$EXPECTED_BUILD_ID" \
         || die "Windows executable does not embed build ID $EXPECTED_BUILD_ID"
-    strings -el "$WINDOWS_EXE" | rg -Fxq "$EXPECTED_PAK_SHA256" \
-        || die "Windows executable does not embed the expected PAK hash"
-    strings -el "$WINDOWS_EXE" | rg -q "$EXPECTED_AUTHOR" \
+    strings -el "$WINDOWS_EXE" | grep -q "$EXPECTED_AUTHOR" \
         || die "Windows executable does not embed creator attribution"
+    "$WINDOWS_EXE" --self-test | grep -q SELF_TEST_PASS \
+        || die "Windows executable self-test failed"
 }
 
 stage_common_docs() {
@@ -179,18 +187,12 @@ build_windows_archive() {
 
     local package_name="Outlast-Requeue-v$VERSION-Windows-x64-build$EXPECTED_BUILD_ID"
     local destination="$STAGE_ROOT/$package_name"
-    mkdir -p -- "$destination/payload"
+    mkdir -p -- "$destination"
 
     install -m 0755 "$WINDOWS_EXE" "$destination/Outlast Requeue.exe"
-    install -m 0644 "$PAK_FILE" "$destination/payload/$PAK_NAME"
     install -m 0644 "$SCRIPT_DIR/windows/README.md" "$destination/README.md"
-    install -m 0644 "$SCRIPT_DIR/windows/Install.ps1" "$destination/Install.ps1"
-    install -m 0644 "$SCRIPT_DIR/windows/Install.bat" "$destination/Install.bat"
-    install -m 0644 "$SCRIPT_DIR/windows/Uninstall.ps1" "$destination/Uninstall.ps1"
-    install -m 0644 "$SCRIPT_DIR/windows/Uninstall.bat" "$destination/Uninstall.bat"
     stage_common_docs "$destination"
 
-    verify_pak "$destination/payload/$PAK_NAME"
     assert_clean_payload "$destination"
     write_tree_checksums "$destination"
     make_zip "$STAGE_ROOT" "$package_name"
@@ -202,8 +204,6 @@ build_source_archive() {
     local executable_files=(
         tests/audit_windows_binary.sh
         packaging/build-release.sh
-        packaging/windows/Install.bat
-        packaging/windows/Uninstall.bat
     )
     local regular_files=(
         BUILDING.md
@@ -212,8 +212,6 @@ build_source_archive() {
         docs/screenshot.png
         src/common/requeue_engine.c
         src/common/requeue_engine.h
-        src/pak/README.md
-        src/pak/patch_trialboard_requeue.py
         src/windows/Makefile
         src/windows/outlast_requeue.manifest
         src/windows/outlast_requeue.rc
@@ -230,9 +228,7 @@ build_source_archive() {
         packaging/RELEASE_CHECKLIST.md
         packaging/THIRD_PARTY_NOTICES.md
         packaging/compatibility.json
-        packaging/windows/Install.ps1
         packaging/windows/README.md
-        packaging/windows/Uninstall.ps1
     )
     local relative
 
@@ -243,7 +239,7 @@ build_source_archive() {
     for relative in "${regular_files[@]}"; do
         copy_source_file "$relative" 0644 "$destination"
     done
-    install -m 0644 "$SCRIPT_DIR/README.md" "$destination/README.md"
+    install -m 0644 "$ROOT_DIR/README.md" "$destination/README.md"
 
     assert_source_payload "$destination"
     assert_clean_payload "$destination"
@@ -251,17 +247,23 @@ build_source_archive() {
     make_zip "$STAGE_ROOT" "$package_name"
 }
 
-require_command awk
 require_command find
 require_command file
 require_command install
-require_command make
-require_command rg
+require_command "$MAKE"
 require_command sha256sum
 require_command sort
 require_command strings
 require_command xargs
-require_command zip
+if command -v zip >/dev/null 2>&1; then
+    PYTHON=""
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+    PYTHON=python
+else
+    die "required command not found: zip or python"
+fi
 
 case "$VERSION" in
     *[!0-9A-Za-z._-]*|'')
@@ -278,10 +280,9 @@ done
 
 [[ -n "${PLATFORMS//[[:space:]]/}" ]] || die "PLATFORMS cannot be empty"
 
-verify_pak "$PAK_FILE"
-rg -q '"version":[[:space:]]*"'"$VERSION"'"' "$SCRIPT_DIR/compatibility.json" \
+grep -qE '"version":[[:space:]]*"'"$VERSION"'"' "$SCRIPT_DIR/compatibility.json" \
     || die "compatibility.json does not describe version $VERSION"
-rg -q '"last_verified_build_id":[[:space:]]*"'"$EXPECTED_BUILD_ID"'"' \
+grep -qE '"last_verified_build_id":[[:space:]]*"'"$EXPECTED_BUILD_ID"'"' \
     "$SCRIPT_DIR/compatibility.json" \
     || die "compatibility.json does not describe game build $EXPECTED_BUILD_ID"
 verify_release_constants
@@ -291,7 +292,8 @@ trap 'rm -rf -- "$TEMP_ROOT"' EXIT
 STAGE_ROOT="$TEMP_ROOT/stage"
 mkdir -p -- "$STAGE_ROOT"
 
-make -C "$ROOT_DIR/tests" clean check
+# shellcheck disable=SC2086
+"$MAKE" -C "$ROOT_DIR/tests" clean check $MAKE_ARGS
 wants_platform windows && build_and_verify_windows
 
 mkdir -p -- "$DIST_DIR"

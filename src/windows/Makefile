@@ -10,7 +10,7 @@ CPPFLAGS := -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -D_WIN32_WINNT=0x0601 \
 	-I$(ROOT)/src/common
 CFLAGS := -std=c17 -O2 -Wall -Wextra -Werror -Wpedantic -ffunction-sections -fdata-sections
 LDFLAGS := -municode -mwindows -Wl,--gc-sections -static-libgcc
-LDLIBS := -luser32 -lshell32 -lole32 -luuid -ladvapi32 -lcomctl32 -ldwmapi -lbcrypt -lgdi32
+LDLIBS := -luser32 -lshell32 -lole32 -luuid -ladvapi32 -lcomctl32 -ldwmapi -lgdi32
 
 .PHONY: all clean audit
 

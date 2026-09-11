@@ -2,6 +2,34 @@
 
 All notable changes to Outlast Requeue are documented here.
 
+## 1.0.4 (2026-09-11)
+
+- The PAK is gone. Game build `25112110` (7.1) checks every mounted PAK
+  against a whitelist and its anti-cheat reports any unknown one, so the
+  patched `F` binding stopped being an option. Nothing in the game folder is
+  touched any more, and there is no installer.
+- The requeue now clicks the real START bar on the Trial Board. Posted mouse
+  messages are dropped while the game believes it is in the background, so the
+  sequence first tells the game it is active with the same messages Windows
+  would post, clicks, and then tells it the opposite. The operating system
+  foreground window never changes and the pointer never moves. Verified on a
+  live client: timeout, Tab, board ready, click, and a new ticket six seconds
+  later, with another application in the foreground the whole time.
+- The START bar is located in a background capture of the game client instead
+  of assumed at a fixed ratio, because the board is anchored to the window
+  edges rather than scaled with it. The last detected position is remembered
+  per client size, and a reference position is used only when no capture is
+  possible.
+- The first Trial selection is always manual. The board remembers it, so the
+  tool only ever presses START; it never picks a therapy or a role.
+- The interface was rebuilt from scratch: a single dark column with the state,
+  the cumulative search timer, the current status, a requeue counter, the
+  attempt number, whether the game window is found, the detected START
+  position, and the activity log. No pills, glyphs, or rounded cards.
+- `--diagnostics` reports the client size and the detected START position when
+  the Trial Board is open, and `--self-test` covers the detector.
+- Last verified game build is `25112110`.
+
 ## 1.0.3 (2026-08-18)
 
 - Fixed the requeue landing on a disabled panel, which is why the sequence

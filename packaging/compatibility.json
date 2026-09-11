@@ -1,23 +1,24 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "release": {
     "name": "Outlast Requeue",
     "author": "whispersgone",
-    "version": "1.0.3",
-    "release_date": "2026-08-18"
+    "version": "1.0.4",
+    "release_date": "2026-09-11"
   },
   "game": {
     "name": "The Outlast Trials",
     "store": "Steam",
     "steam_app_id": 1304930,
-    "last_verified_build_id": "24382135",
+    "last_verified_build_id": "25112110",
     "engine_family": "Unreal Engine 4.27",
     "strict_build_match": false
   },
-  "pak": {
-    "filename": "zzz-OutlastRequeue_P.pak",
-    "sha256": "1998125961ea66886ae41d71fe15ec2d555d045b980bc487ac5a6ea2a92d0c54",
-    "install_path_relative_to_game": "OPP/Content/Paks/zzz-OutlastRequeue_P.pak"
+  "method": {
+    "game_files_modified": false,
+    "trial_board_open": "posted Tab, gated on the game's own menu log records",
+    "start_button": "located in a background capture of the game client, then a posted mouse click",
+    "activation": "activation messages posted to the game window only; the operating system foreground window is never changed"
   },
   "platforms": {
     "windows": {
@@ -25,7 +26,7 @@
       "distribution": "portable",
       "service": false,
       "autostart": false,
-      "native_hardware_validation": "pending"
+      "native_hardware_validation": "verified"
     }
   },
   "automation_contract": {

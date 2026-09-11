@@ -1,12 +1,12 @@
 # Outlast Requeue
 
 Restarts an Invasion search in The Outlast Trials after the game's own
-matchmaking ticket times out, without stealing focus, moving your cursor, or
-touching global input.
+matchmaking ticket times out. It never changes the foreground window, never
+moves your cursor, never uses global input, and touches no game file.
 
 ![The application in standby and in its armed state](docs/screenshot.png)
 
-Created by whispersgone. Version 1.0.3, Windows x64.
+Created by whispersgone. Version 1.0.4, Windows x64.
 
 ## The problem
 
@@ -15,80 +15,67 @@ searching and drops you back to the Trial Board. If you are not watching the
 screen, the queue is simply dead until you notice.
 
 Outlast Requeue watches the game's own log, recognises the timeout for the
-exact ticket it armed, and starts the search again once. Then it waits for the
-game to confirm that a new ticket actually exists.
+exact ticket it armed, and presses START again from the background. Then it
+waits for the game to confirm that a new ticket actually exists.
 
 ## How it works
 
-The application never guesses at game state. It reads
-`%LOCALAPPDATA%\OPP\Saved\Logs\OPP.log`, the log the game already writes, and
-tracks one Invasion ticket at a time:
+The application reads `%LOCALAPPDATA%\OPP\Saved\Logs\OPP.log`, the log the
+game already writes, and tracks one Invasion ticket at a time:
 
-1. You start the first Imposter search yourself. The application sees the
-   `context=invasion` search event and arms that exact ticket ID.
-2. When a `type=timed_out` event arrives for that same ticket, and only then,
-   it lets the client finish handling that timeout, posts `Tab` to the game
-   window, and waits for the game to log that the Trial Board is accepting
-   input again before posting `F`. The board refuses input for the whole push
-   transition, so a fixed delay lands on that boundary and the press is lost.
-   If the board was already open, the first `Tab` closes it and the log says
-   so, and the application simply opens it again.
-3. A new Invasion ticket has to appear in the log within 25 seconds. If it does
-   not, the same sequence is repeated, up to three attempts on that one ticket,
-   and then the application stops and waits for you. Nothing is ever posted
-   without a timed-out ticket to justify it.
+1. You select Imposter and start the first search yourself. The application
+   sees the `context=invasion` search event and arms that exact ticket ID. The
+   board remembers your selection, so nothing else ever has to be chosen.
+2. When a `type=timed_out` event arrives for that same ticket, it lets the
+   client finish handling the timeout, posts `Tab` to the game window, and
+   waits for the game to log that the Trial Board is accepting input. If the
+   board was already open, the first `Tab` closes it, the log says so, and it
+   is opened again.
+3. It captures the game client in the background, locates the START bar in
+   that capture, and posts a mouse click at it. The game drops mouse messages
+   while it believes it is in the background, so it is first told that it is
+   active with the same messages Windows would post, and told the opposite
+   right after the click. Which window is in the foreground never changes.
+4. A new Invasion ticket has to appear in the log within 25 seconds. If it does
+   not, the sequence is repeated, up to three attempts on that one ticket, and
+   then the application waits for you.
 
-The game refuses `Tab` for a while after a matchmaking timeout, so an
-unacknowledged press is reposted every three seconds for up to two minutes. An
-ignored press costs nothing, and the log says plainly when one lands.
-
-Both key messages go to one specific window: the visible `UnrealWindow` whose
-process image matches the executable inside the game folder it discovered. The
-game is never activated, raised, or focused.
-
-The `F` action works because of a small PAK that redirects the existing Trial
-Board `F` binding to the Invasion start path. The PAK changes one operand in
-one cooked Blueprint asset and cannot requeue anything by itself.
+Both the key and the click go to one specific window: the visible
+`UnrealWindow` whose process image matches the executable inside the game
+folder it discovered.
 
 ## Requirements
 
 | Item | Value |
 | --- | --- |
 | Game | The Outlast Trials on Steam, App ID `1304930` |
-| Last verified game build | `24322931` |
+| Last verified game build | `25112110` |
 | System | Windows x64 |
-| PAK SHA-256 | `1998125961ea66886ae41d71fe15ec2d555d045b980bc487ac5a6ea2a92d0c54` |
 
-The application does not refuse to run on a newer Steam build number, because
-that number changes on every hotfix even when nothing this tool touches has
-changed. What it does enforce is the PAK hash. If the installed PAK is not the
-exact expected file, it will not automate.
+Nothing is installed into the game folder. The application does not refuse to
+run on a newer Steam build; it depends only on the game's log records and on
+the Trial Board layout.
 
-## Installing
+## Use
 
-Download the Windows archive, extract all of it, close the game, and run
-`Install.bat`. The installer verifies the bundled PAK by SHA-256 before copying
-it, and refuses to overwrite a file of the same name with a different hash.
+Download the Windows archive, extract it, and run `Outlast Requeue.exe`. Start
+the game, enter the Sleep Room, enable auto-requeue, then open the Terminal,
+select Imposter, and start the first search yourself. Closing the window with
+the title-bar X exits the application completely. There is no tray icon and
+nothing keeps running in the background.
 
-If Steam discovery fails, point the script at the folder yourself:
+`Outlast Requeue.exe --diagnostics` prints what the application discovers,
+including the START position it detects while the Trial Board is open.
 
-```powershell
-.\Install.ps1 -GameDir "D:\SteamLibrary\steamapps\common\The Outlast Trials"
-```
-
-Then start the game, enter the Sleep Room, run `Outlast Requeue.exe`, enable
-auto-requeue, and start the first Imposter search manually. Closing the window
-with the title-bar X exits the application completely. There is no tray icon
-and nothing keeps running in the background.
-
-Full instructions, including removal and troubleshooting, are in
+Full instructions and troubleshooting are in
 [packaging/windows/README.md](packaging/windows/README.md).
 
 ## Safety boundaries
 
 Outlast Requeue:
 
-- never activates, raises, or focuses the game window;
+- never modifies, adds, or removes game files;
+- never changes which window is in the foreground;
 - never uses global keyboard or mouse input;
 - never moves the pointer;
 - never changes fullscreen, borderless, resolution, or display settings;
@@ -116,39 +103,4 @@ needs no separate runtime. The state engine has its own test suite:
 make -C tests clean check
 ```
 
-See [BUILDING.md](BUILDING.md) for release archives and asset provenance.
-
-## Repository layout
-
-```
-src/windows/   native Win32 application
-src/common/    platform-neutral ticket state engine, shared with the tests
-src/pak/       patch script and the pinned asset hashes
-packaging/     installer scripts, release builder, and documentation
-tests/         engine test suite and the binary contract audit
-```
-
-## After a game update
-
-Steam bumps its build number on every hotfix, so the number alone tells you
-nothing. Check the asset instead. Extract the stock `TrialBoardTab` pair from
-the new build and hash it.
-
-If the hashes still match the values pinned in
-[src/pak/README.md](src/pak/README.md), the existing PAK is still correct. If
-they differ, the ubergraph offsets have to be derived again, because they are
-recompiled per build and the old constants point at the wrong handler.
-
-## Online-game notice
-
-This is an unofficial community tool and is not affiliated with or endorsed by
-Red Barrels. Game updates, matchmaking changes, platform rules, and
-anti-cheat or mod policies can change. No release can guarantee account safety.
-Review the current rules and use third-party modifications at your own risk.
-
-## Licensing
-
-`LICENSE-CODE` covers the original Outlast Requeue code only. The modified game
-asset, the game icon and artwork, The Outlast Trials itself, and third-party
-components are not licensed under that file. See
-[THIRD_PARTY_NOTICES.md](packaging/THIRD_PARTY_NOTICES.md).
+See [BUILDING.md](BUILDING.md) for release archives.
